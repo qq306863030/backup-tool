@@ -97,6 +97,41 @@ backup start my-config.json5  # searched in ~/.backup-tool
 | `backup logs` | View service logs |
 | `backup help` | Show help |
 
+### Cron expression
+
+The `cron` field of each task uses a standard **5-field cron expression**:
+
+```
+minute hour day month weekday
+```
+
+| Field | Range | Description |
+|-------|-------|-------------|
+| minute | `0-59` | Minute |
+| hour | `0-23` | Hour |
+| day | `1-31` | Day of month |
+| month | `1-12` | Month |
+| weekday | `0-7` | Day of week (`0` and `7` both mean Sunday) |
+
+**Special characters:**
+
+| Char | Meaning | Example |
+|------|---------|---------|
+| `*` | Any value | `* * * * *` every minute |
+| `,` | List | `0,30 * * * *` at minute 0 and 30 of every hour |
+| `-` | Range | `0 9-18 * * *` every hour from 9 AM to 6 PM |
+| `/` | Step | `*/5 * * * *` every 5 minutes |
+
+**Common examples:**
+
+| cron expression | Meaning |
+|-----------------|---------|
+| `0 2 * * *` | Every day at 2 AM |
+| `0 3 * * 0` | Every Sunday at 3 AM |
+| `*/30 * * * *` | Every 30 minutes |
+| `0 0 1 * *` | At midnight on the 1st of every month |
+| `0 9-18 * * 1-5` | Every hour from 9 AM to 6 PM on weekdays (Mon-Fri) |
+
 ### Config file path resolution
 
 The `configFilePath` argument of `backup start` / `backup reload` supports:

@@ -25,7 +25,7 @@ class IncrementalBackup {
    */
   async run(connector, task) {
     const { source, destination, incremental } = task;
-    const { compareBy, deleteRemoved, include, exclude, concurrency } = incremental;
+    const { compareBy, deleteRemoved, include, exclude } = incremental;
 
     this.logger.info(`[incremental] ${task.name}: 开始增量备份 ${source} -> ${destination}`);
     this.storage.ensureDir(destination);
@@ -55,8 +55,8 @@ class IncrementalBackup {
       }
     }
 
-    // 4. 并发下载
-    const downloaded = await this.downloadWithConcurrency(connector, toDownload, concurrency);
+    // 4. 下载文件（串行，ssh2-sftp-client 单连接不支持并发 fastGet）
+    const downloaded = await this.downloadWithConcurrency(connector, toDownload);
 
     // 5. 可选：删除远程已删除的文件
     let removed = 0;
@@ -71,34 +71,25 @@ class IncrementalBackup {
   }
 
   /**
-   * 并发下载文件
+   * 下载文件（串行）
+   * 注意：ssh2-sftp-client 的 fastGet 不支持在同一连接上并发调用，
+   * 因此这里必须串行下载，否则会报 "No SFTP connection available"。
    * @param {object} connector
    * @param {Array} jobs [{ entry, rel, localPath }]
-   * @param {number} concurrency
    * @returns {Promise<number>} 下载数量
    */
-  async downloadWithConcurrency(connector, jobs, concurrency) {
-    let index = 0;
+  async downloadWithConcurrency(connector, jobs) {
     let downloaded = 0;
-    const worker = async () => {
-      while (index < jobs.length) {
-        const job = jobs[index++];
-        try {
-          this.storage.ensureDir(path.dirname(job.localPath));
-          await connector.download(job.entry.path, job.localPath, job.entry.mtime);
-          downloaded++;
-          this.logger.debug(`[incremental] 下载 ${job.entry.path}`);
-        } catch (err) {
-          this.logger.error(`[incremental] 下载失败 ${job.entry.path}: ${err.message}`);
-        }
+    for (const job of jobs) {
+      try {
+        this.storage.ensureDir(path.dirname(job.localPath));
+        await connector.download(job.entry.path, job.localPath, job.entry.mtime);
+        downloaded++;
+        this.logger.debug(`[incremental] 下载 ${job.entry.path}`);
+      } catch (err) {
+        this.logger.error(`[incremental] 下载失败 ${job.entry.path}: ${err.message}`);
       }
-    };
-    const workers = [];
-    const n = Math.max(1, Math.min(concurrency || 1, jobs.length || 1));
-    for (let i = 0; i < n; i++) {
-      workers.push(worker());
     }
-    await Promise.all(workers);
     return downloaded;
   }
 

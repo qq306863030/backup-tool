@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('path');
+const os = require('os');
 const { ConfigError } = require('../errors');
 const { DEFAULT_LOG_DIR, DEFAULT_BACKUP_DIR } = require('../paths');
 
@@ -38,6 +39,23 @@ const DEFAULTS = {
 };
 
 /**
+ * 展开路径中的 ~ 为 home 目录
+ * 支持：
+ *   ~/xxx        -> <home>/xxx
+ *   ~/.backup-tool/xxx -> <home>/.backup-tool/xxx
+ * @param {string} p 路径
+ * @returns {string} 展开后的路径
+ */
+function expandHome(p) {
+  if (typeof p !== 'string' || p.length === 0) return p;
+  if (p === '~') return os.homedir();
+  if (p.startsWith('~/') || p.startsWith('~\\')) {
+    return path.join(os.homedir(), p.slice(2));
+  }
+  return p;
+}
+
+/**
  * 适配顶层配置
  * @param {object} raw 用户配置
  * @returns {object} 内部标准配置
@@ -48,6 +66,8 @@ function adaptConfig(raw) {
   }
 
   const log = { ...DEFAULTS.log, ...(raw.log || {}) };
+  // 展开日志目录中的 ~
+  log.dir = expandHome(log.dir);
 
   if (!Array.isArray(raw.servers) || raw.servers.length === 0) {
     throw new ConfigError('配置缺少 servers 数组');
@@ -141,8 +161,8 @@ function adaptTask(task, host) {
     type: task.type,
     cron: task.cron,
     source: task.source,
-    // destination 可选，默认 ~/.backup-tool/backups/<name>
-    destination: task.destination || path.join(DEFAULTS.task.destination, task.name),
+    // destination 可选，默认 ~/.backup-tool/backups/<name>，并展开 ~
+    destination: expandHome(task.destination || path.join(DEFAULTS.task.destination, task.name)),
   };
 
   if (task.type === 'incremental') {
@@ -176,4 +196,4 @@ function normalizeArray(value) {
   return [value];
 }
 
-module.exports = { adaptConfig, adaptServer, adaptTask, detectAuth, DEFAULTS };
+module.exports = { adaptConfig, adaptServer, adaptTask, detectAuth, expandHome, DEFAULTS };

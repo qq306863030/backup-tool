@@ -2,7 +2,56 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { adaptConfig, detectAuth } = require('../src/config/adapter');
+const os = require('os');
+const path = require('path');
+const { adaptConfig, detectAuth, expandHome } = require('../src/config/adapter');
+
+test('expandHome: 展开 ~ 为 home 目录', () => {
+  assert.strictEqual(expandHome('~/foo'), path.join(os.homedir(), 'foo'));
+  assert.strictEqual(expandHome('~/.backup-tool/backups'), path.join(os.homedir(), '.backup-tool', 'backups'));
+  assert.strictEqual(expandHome('~'), os.homedir());
+});
+
+test('expandHome: 非 ~ 路径原样返回', () => {
+  assert.strictEqual(expandHome('/abs/path'), '/abs/path');
+  assert.strictEqual(expandHome('./rel/path'), './rel/path');
+  assert.strictEqual(expandHome(''), '');
+});
+
+test('adaptConfig: destination 中的 ~ 被展开', () => {
+  const raw = {
+    servers: [
+      {
+        host: '1.2.3.4',
+        username: 'root',
+        password: 'secret',
+        tasks: [
+          { name: 't1', type: 'incremental', cron: '0 2 * * *', source: '/a', destination: '~/backups/t1' },
+        ],
+      },
+    ],
+  };
+  const config = adaptConfig(raw);
+  assert.strictEqual(config.servers[0].tasks[0].destination, path.join(os.homedir(), 'backups', 't1'));
+});
+
+test('adaptConfig: log.dir 中的 ~ 被展开', () => {
+  const raw = {
+    log: { dir: '~/mylogs' },
+    servers: [
+      {
+        host: '1.2.3.4',
+        username: 'root',
+        password: 'secret',
+        tasks: [
+          { name: 't1', type: 'incremental', cron: '0 2 * * *', source: '/a', destination: './b' },
+        ],
+      },
+    ],
+  };
+  const config = adaptConfig(raw);
+  assert.strictEqual(config.log.dir, path.join(os.homedir(), 'mylogs'));
+});
 
 test('adaptConfig: 填充默认值', () => {
   const raw = {

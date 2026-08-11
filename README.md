@@ -20,28 +20,15 @@
 
 ### 1. 安装
 
-```bash
-# 克隆仓库
-git clone https://github.com/qq306863030/backup-tool.git
-cd backup-tool
-
-# 安装依赖
-npm install
-
-# 全局安装（可选，使 backup 命令全局可用）
-npm link
-```
-
-### 2. 前置依赖
-
-- **Node.js** >= 18
-- **PM2**（用于进程守护）
+全局安装 `backup-tool`（PM2 已作为依赖自动安装，无需额外配置）：
 
 ```bash
-npm install -g pm2
+npm install backup-tool -g -verbose
 ```
 
-### 3. 创建配置文件
+> 要求 **Node.js >= 18**。
+
+### 2. 创建配置文件
 
 在 `~/.backup-tool/backup.config.json5` 创建配置文件（首次运行 `backup start` 会自动创建该目录）：
 
@@ -80,7 +67,7 @@ npm install -g pm2
 }
 ```
 
-### 4. 启动服务
+### 3. 启动服务
 
 ```bash
 # 使用默认配置文件 ~/.backup-tool/backup.config.json5
@@ -128,123 +115,81 @@ backup start my-config.json5  # 在 ~/.backup-tool 下查找
         └── ...
 ```
 
-## 全量配置
-
-### 顶层字段
-
-| 字段 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| `log` | object | - | 见下 | 日志配置 |
-| `servers` | array | ✅ | - | 服务器列表（每个内含自己的 tasks） |
-
-### `log` 日志配置
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `level` | string | `"info"` | 日志级别：`debug`/`info`/`warn`/`error` |
-| `dir` | string | `"~/.backup-tool/logs"` | 日志目录 |
-| `maxFiles` | number | `30` | 日志文件保留数量 |
-| `maxSize` | string | `"10m"` | 单个日志文件大小 |
-
-### `servers[]` 服务器配置
-
-| 字段 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| `host` | string | ✅ | - | SFTP 服务器地址 |
-| `port` | number | - | `22` | 端口 |
-| `username` | string | ✅ | - | 用户名 |
-| `password` | string | 二选一 | - | 密码认证（有此项则用密码） |
-| `privateKeyPath` | string | 二选一 | - | 私钥路径（有此项则用私钥） |
-| `passphrase` | string | - | - | 私钥口令（仅私钥认证时） |
-| `connectTimeout` | number | - | `10000` | 连接超时 ms |
-| `retry.max` | number | - | `3` | 失败重试次数 |
-| `retry.delay` | number | - | `5000` | 重试间隔 ms |
-| `tasks` | array | ✅ | - | 该服务器下的备份任务 |
-
-> **认证判断**：`password` 存在 → 密码认证；`privateKeyPath` 存在 → 私钥认证；两者都无 → 启动报错。
-
-### `tasks[]` 任务配置
-
-| 字段 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| `name` | string | ✅ | - | 任务名称（用于日志与全量备份目录名） |
-| `enabled` | boolean | - | `true` | 是否启用 |
-| `type` | string | ✅ | - | `incremental` / `full` |
-| `cron` | string | ✅ | - | cron 表达式（分 时 日 月 周） |
-| `source` | string | ✅ | - | 远程源路径（文件或目录） |
-| `destination` | string | ✅ | - | 本地目标路径 |
-
-### 增量任务 `incremental`（type=incremental 时）
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `compareBy` | array | `["name","size","mtime"]` | 比较依据 |
-| `deleteRemoved` | boolean | `false` | 远程删除的文件本地是否同步删除 |
-| `include` | array | `[]` | 仅包含规则（**优先于 exclude**） |
-| `exclude` | array | `[]` | 排除规则 |
-| `concurrency` | number | `4` | 并发下载数 |
-
-### 全量任务 `full`（type=full 时）
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `maxBackups` | number | `5` | 最多保留份数，超出删除最老的 |
-| `timestampFormat` | string | `"YYYYMMDD-HHmmss"` | 时间戳后缀格式 |
-| `compress` | boolean | `true` | 是否压缩为 zip |
-| `exclude` | array | `[]` | 排除规则 |
-
 ## 完整配置示例
 
 ```json5
 {
-  // 全局日志配置
+  // ============ 全局日志配置 ============
   log: {
+    // 日志级别：debug | info | warn | error，默认 info
     level: "info",
+    // 日志目录，默认 ~/.backup-tool/logs
     dir: "~/.backup-tool/logs",
+    // 日志文件保留数量，默认 30
     maxFiles: 30,
+    // 单个日志文件大小，默认 10m
     maxSize: "10m",
   },
 
+  // ============ 服务器列表（每个内含自己的 tasks） ============
   servers: [
     {
-      // SFTP 服务器连接信息
-      host: "192.168.1.100",
-      port: 22,
-      username: "root",
-      password: "your-password",
+      // ---- 连接信息 ----
+      host: "192.168.1.100",        // 必填：SFTP 服务器地址
+      port: 22,                     // 可选，默认 22
+      username: "root",             // 必填：用户名
 
-      // 连接与重试（可选，省略用默认值）
-      // connectTimeout: 10000,
-      // retry: { max: 3, delay: 5000 },
+      // ---- 认证（自动判断，二选一即可） ----
+      password: "your-password",    // 有此项 → 密码认证
+      // privateKeyPath: "~/.ssh/id_rsa", // 有此项 → 私钥认证
+      // passphrase: "xxx",         // 私钥口令（可选，仅私钥认证时用）
 
+      // ---- 连接与重试（可选，省略用默认值） ----
+      // connectTimeout: 10000,     // 默认 10000ms
+      // retry: { max: 3, delay: 5000 }, // 默认 { max: 3, delay: 5000 }
+
+      // ---- 该服务器下的备份任务（可多个） ----
       tasks: [
-        // 增量备份示例
+        // ---------- 增量备份 ----------
         {
-          name: "data",
-          type: "incremental",
-          cron: "0 2 * * *",
-          source: "/data",
-          destination: "~/.backup-tool/backups/data",
+          name: "data",                  // 必填：任务名称（用于日志与全量备份目录名）
+          enabled: true,                 // 可选，是否启用，默认 true
+          type: "incremental",           // 必填：incremental | full
+          cron: "0 2 * * *",             // 必填：cron 表达式（分 时 日 月 周）
+          source: "/data",               // 必填：远程源路径（文件或目录）
+          destination: "~/.backup-tool/backups/data", // 必填：本地目标路径
+
           incremental: {
+            // 比较依据：name | size | mtime，默认 ["name","size","mtime"]
             compareBy: ["name", "size", "mtime"],
+            // 远程删除的文件本地是否同步删除，默认 false
             deleteRemoved: false,
-            include: ["**/*.sql"],   // 仅备份 sql 文件
-            exclude: ["*.tmp"],      // 排除临时文件
+            // 仅包含规则（优先于 exclude），默认 []
+            include: ["**/*.sql"],
+            // 排除规则，默认 []
+            exclude: ["*.tmp", "*.log"],
+            // 并发下载数，默认 4
             concurrency: 4,
           },
         },
 
-        // 全量备份示例
+        // ---------- 全量备份 ----------
         {
           name: "nginx",
+          enabled: true,
           type: "full",
           cron: "0 3 * * 0",
           source: "/etc/nginx",
           destination: "~/.backup-tool/backups/nginx",
+
           full: {
+            // 最多保留份数，超出删除最老的，默认 5
             maxBackups: 5,
+            // 时间戳后缀格式，默认 YYYYMMDD-HHmmss
             timestampFormat: "YYYYMMDD-HHmmss",
+            // 是否压缩为 zip，默认 true
             compress: true,
+            // 排除规则，默认 []
             exclude: ["*.log"],
           },
         },
@@ -271,25 +216,16 @@ backup start my-config.json5  # 在 ~/.backup-tool 下查找
 }
 ```
 
-## 打包
-
-使用 Rollup 打包为单个可执行 bundle：
-
-```bash
-# 打包当前平台
-npm run build
-
-# 打包指定平台
-npm run build:win
-npm run build:linux
-npm run build:mac
-```
-
-打包产物输出到 `dist/backup.js`，可通过 `node dist/backup.js <command>` 运行。
-
 ## 开发
 
 ```bash
+# 克隆仓库
+git clone https://github.com/qq306863030/backup-tool.git
+cd backup-tool
+
+# 安装依赖
+npm install
+
 # 运行单元测试
 npm test
 

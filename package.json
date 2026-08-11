@@ -1,7 +1,7 @@
 {
-  "name": "backup-tool",
+  "name": "lite-backup-tool",
   "version": "1.0.0",
-  "description": "从远程服务器(SFTP)自动拉取文件备份工具，支持增量与全量备份",
+  "description": "A lightweight SFTP backup tool supporting incremental and full backups",
   "main": "src/index.js",
   "bin": {
     "backup": "bin/backup.js"

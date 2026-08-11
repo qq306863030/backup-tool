@@ -26,13 +26,21 @@
 
 ### 1. 安装
 
-全局安装 `lite-backup-tool`（PM2 已作为依赖自动安装，无需额外配置）：
+**前置依赖：本工具通过 PM2 守护进程运行，请先全局安装 PM2：**
+
+```bash
+npm install -g pm2
+```
+
+然后全局安装 `lite-backup-tool`：
 
 ```bash
 npm install lite-backup-tool -g -verbose
 ```
 
 > 要求 **Node.js >= 18**。
+> 
+> 注意：PM2 **必须全局安装**，不能用 `npm install pm2` 安装到项目本地，否则 `backup start` 会报"未检测到 PM2"错误。
 
 ### 2. 创建配置文件
 

@@ -22,8 +22,7 @@
   "keywords": [
     "backup",
     "sftp",
-    "cron",
-    "pm2"
+    "cron"
   ],
   "license": "MIT",
   "repository": {
@@ -37,7 +36,6 @@
     "json5": "^2.2.3",
     "micromatch": "^4.0.8",
     "node-cron": "^4.6.0",
-    "pm2": "^7.0.3",
     "ssh2-sftp-client": "^12.1.1",
     "winston": "^3.15.0"
   }

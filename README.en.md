@@ -26,13 +26,21 @@
 
 ### 1. Install
 
-Install `lite-backup-tool` globally (PM2 is bundled as a dependency, no extra setup needed):
+**Prerequisite: this tool runs as a PM2 daemon, so please install PM2 globally first:**
+
+```bash
+npm install -g pm2
+```
+
+Then install `lite-backup-tool` globally:
 
 ```bash
 npm install lite-backup-tool -g -verbose
 ```
 
 > Requires **Node.js >= 18**.
+>
+> Note: PM2 **must be installed globally**. Installing it locally via `npm install pm2` will cause `backup start` to fail with "未检测到 PM2" / "PM2 not detected" error.
 
 ### 2. Create config file
 

@@ -1,0 +1,79 @@
+'use strict';
+
+const { test } = require('node:test');
+const assert = require('node:assert');
+const { adaptConfig, detectAuth } = require('../src/config/adapter');
+
+test('adaptConfig: 填充默认值', () => {
+  const raw = {
+    servers: [
+      {
+        host: '1.2.3.4',
+        username: 'root',
+        password: 'secret',
+        tasks: [
+          { name: 't1', type: 'incremental', cron: '0 2 * * *', source: '/a', destination: './b' },
+        ],
+      },
+    ],
+  };
+  const config = adaptConfig(raw);
+  const server = config.servers[0];
+  assert.strictEqual(server.port, 22);
+  assert.strictEqual(server.connectTimeout, 10000);
+  assert.deepStrictEqual(server.retry, { max: 3, delay: 5000 });
+  assert.strictEqual(server.auth.type, 'password');
+
+  const task = server.tasks[0];
+  assert.strictEqual(task.enabled, true);
+  assert.deepStrictEqual(task.incremental.compareBy, ['name', 'size', 'mtime']);
+  assert.strictEqual(task.incremental.deleteRemoved, false);
+  assert.strictEqual(task.incremental.concurrency, 4);
+});
+
+test('adaptConfig: 认证自动判断 - 密码', () => {
+  const auth = detectAuth({ host: 'h', username: 'u', password: 'p' });
+  assert.deepStrictEqual(auth, { type: 'password', password: 'p' });
+});
+
+test('adaptConfig: 认证自动判断 - 私钥', () => {
+  const auth = detectAuth({ host: 'h', username: 'u', privateKeyPath: '/key', passphrase: 'pp' });
+  assert.deepStrictEqual(auth, { type: 'privateKey', privateKeyPath: '/key', passphrase: 'pp' });
+});
+
+test('adaptConfig: 认证自动判断 - 无认证报错', () => {
+  assert.throws(() => detectAuth({ host: 'h', username: 'u' }));
+});
+
+test('adaptConfig: 全量任务默认值', () => {
+  const raw = {
+    servers: [
+      {
+        host: '1.2.3.4',
+        username: 'root',
+        privateKeyPath: '/key',
+        tasks: [
+          { name: 't1', type: 'full', cron: '0 3 * * 0', source: '/a', destination: './b' },
+        ],
+      },
+    ],
+  };
+  const config = adaptConfig(raw);
+  const task = config.servers[0].tasks[0];
+  assert.strictEqual(task.full.maxBackups, 5);
+  assert.strictEqual(task.full.compress, true);
+  assert.strictEqual(task.full.timestampFormat, 'YYYYMMDD-HHmmss');
+});
+
+test('adaptConfig: 缺少 servers 报错', () => {
+  assert.throws(() => adaptConfig({}));
+});
+
+test('adaptConfig: 缺少认证报错', () => {
+  const raw = {
+    servers: [
+      { host: '1.2.3.4', username: 'root', tasks: [] },
+    ],
+  };
+  assert.throws(() => adaptConfig(raw));
+});

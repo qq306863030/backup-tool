@@ -1,0 +1,45 @@
+{
+  "name": "backup-tool",
+  "version": "1.0.0",
+  "description": "从远程服务器(SFTP)自动拉取文件备份工具，支持增量与全量备份",
+  "main": "src/index.js",
+  "bin": {
+    "backup": "bin/backup.js"
+  },
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test \"test/**/*.test.js\"",
+    "build": "rollup -c",
+    "build:win": "rollup -c --environment BUILD_TARGET:win",
+    "build:linux": "rollup -c --environment BUILD_TARGET:linux",
+    "build:mac": "rollup -c --environment BUILD_TARGET:mac"
+  },
+  "keywords": [
+    "backup",
+    "sftp",
+    "cron",
+    "pm2"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qq306863030/backup-tool.git"
+  },
+  "dependencies": {
+    "archiver": "^8.0.0",
+    "dayjs": "^1.11.13",
+    "fast-glob": "^3.3.2",
+    "json5": "^2.2.3",
+    "micromatch": "^4.0.8",
+    "node-cron": "^4.6.0",
+    "ssh2-sftp-client": "^12.1.1",
+    "winston": "^3.15.0"
+  },
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^29.0.3",
+    "@rollup/plugin-json": "^6.1.0",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "rollup": "^4.62.4"
+  }
+}

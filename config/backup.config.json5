@@ -1,0 +1,50 @@
+{
+  // 全局日志配置
+  log: {
+    level: "info",
+    dir: "./logs",
+    maxFiles: 30,
+    maxSize: "10m",
+  },
+
+  servers: [
+    {
+      host: "116.196.68.99",
+      port: 22,
+      username: "root",
+      password: "ZYzx1357%",
+
+      tasks: [
+        // 增量备份：测试文件
+        {
+          name: "clash",
+          type: "incremental",
+          cron: "*/5 * * * *",   // 每 5 分钟（测试用）
+          source: "/roman/clash.tar",
+          destination: "./backups/clash",
+          incremental: {
+            compareBy: ["name", "size", "mtime"],
+            deleteRemoved: false,
+            include: [],
+            exclude: [],
+            concurrency: 4,
+          },
+        },
+        // 全量备份：测试目录
+        {
+          name: "frp",
+          type: "full",
+          cron: "*/5 * * * *",   // 每 5 分钟（测试用）
+          source: "/roman/frp/",
+          destination: "./backups/frp",
+          full: {
+            maxBackups: 3,
+            timestampFormat: "YYYYMMDD-HHmmss",
+            compress: true,
+            exclude: [],
+          },
+        },
+      ],
+    },
+  ],
+}

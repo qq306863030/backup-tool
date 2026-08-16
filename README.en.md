@@ -19,6 +19,9 @@
 - 📝 **JSON5 config**: Supports comments, trailing commas, and single quotes.
 - 🗜️ **ZIP compression**: Full backups are auto-compressed to zip.
 - 🎯 **Filter rules**: Incremental backup supports `include`/`exclude` glob filters (include takes priority).
+- ⏸️ **Resumable transfer**: `backup up` / `backup down` resume automatically from where they left off after an interruption.
+- 📊 **Live progress**: Upload/download progress is shown in place on a single console line (no scrolling).
+- 🔀 **Command alias**: `bak` is fully equivalent to `backup`.
 
 ---
 
@@ -50,6 +53,7 @@ Create a config file at `~/.backup-tool/backup.config.json5` (the directory is a
 {
   servers: [
     {
+      name: "prod",               // Optional: server name (used by backup up/down), defaults to host
       host: "192.168.1.100",
       username: "root",
       password: "your-password",
@@ -92,6 +96,8 @@ backup start /path/to/your-config.json5
 backup start my-config.json5  # searched in ~/.backup-tool
 ```
 
+> **Alias**: `bak` is an alias for `backup` (available after global npm install). Every command works with `bak` too, e.g. `bak exec`, `bak up prod ./file`.
+
 ---
 
 ## Commands
@@ -99,11 +105,46 @@ backup start my-config.json5  # searched in ~/.backup-tool
 | Command | Description |
 |------|------|
 | `backup start [configFilePath]` | Start backup service (PM2 daemon) |
+| `backup exec [configFilePath]` | Run all enabled tasks immediately (skip scheduling) |
+| `backup up <server-name> <file/folder> [remote-path]` | Upload a local file/folder to the server (relative paths are based on `upload-basedir`) |
+| `backup down <server-name> <file/folder> [local-path]` | Download a file/folder from the server (relative paths are based on `upload-basedir`) |
 | `backup stop` | Stop backup service |
 | `backup clear` | Clear PM2 instance |
 | `backup reload [configFilePath]` | Reload config and restart |
 | `backup logs` | View service logs |
 | `backup help` | Show help |
+
+### Upload / Download examples
+
+`server-name` maps to the server's `name` field; when unset it defaults to `host`.
+
+Remote path resolution rules (`upload-basedir` is the optional base directory configured on the server):
+
+- **Absolute paths** (starting with `/`): used as-is, bypass the base directory.
+- **Relative paths**: resolved against `upload-basedir`.
+- **No remote path given** (upload only): defaults to `upload-basedir`; if unset, defaults to the server home directory.
+
+```bash
+# Upload a local file (to the home directory if no base dir, or to the base dir if configured)
+backup up prod ./nginx.conf
+
+# Upload a local folder to an absolute remote path
+backup up prod ./configs /etc/app
+
+# Upload a local folder to a relative path under the base dir
+backup up prod ./configs app/configs
+
+# Download a remote file (absolute path)
+backup down prod /etc/nginx/nginx.conf
+
+# Download a relative path under the base dir
+backup down prod conf.d/nginx.conf
+
+# Download a remote folder to a local directory
+backup down prod /etc/nginx ./downloads
+```
+
+> Transfers support **resumable upload/download** and show **live progress** on a single console line.
 
 ### Cron expression
 
@@ -188,9 +229,15 @@ If the config file does not exist, an error is reported and the process exits.
   servers: [
     {
       // ---- Connection info ----
+      name: "prod",                 // Optional: server name (used by backup up/down), defaults to host
       host: "192.168.1.100",        // Required: SFTP server address
       port: 22,                     // Optional, default 22
       username: "root",             // Required: username
+
+      // ---- Upload/download base directory (optional) ----
+      // Relative paths of backup up/down are resolved against it; if unset, they are
+      // resolved against the server home directory
+      // upload-basedir: "/srv/backup",
 
       // ---- Auth (auto-detected, pick one) ----
       password: "your-password",    // If present → password auth

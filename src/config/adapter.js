@@ -73,7 +73,9 @@ function adaptConfig(raw) {
     throw new ConfigError('配置缺少 servers 数组');
   }
 
-  const servers = raw.servers.map(adaptServer);
+  // 顶层 upload-basedir 作为所有服务器的默认上传/下载基准目录
+  const uploadBasedir = raw['upload-basedir'] || null;
+  const servers = raw.servers.map((server) => adaptServer(server, uploadBasedir));
 
   return { log, servers };
 }
@@ -81,9 +83,10 @@ function adaptConfig(raw) {
 /**
  * 适配单个服务器
  * @param {object} server 用户服务器配置
+ * @param {string} [defaultBasedir] 顶层默认上传/下载基准目录
  * @returns {object} 内部标准服务器配置
  */
-function adaptServer(server) {
+function adaptServer(server, defaultBasedir) {
   if (!server || typeof server !== 'object') {
     throw new ConfigError('服务器配置必须是对象');
   }
@@ -94,6 +97,8 @@ function adaptServer(server) {
   const auth = detectAuth(server);
 
   const adapted = {
+    // 服务器名称，用于 backup up/down 命令定位；未配置时默认使用 host
+    name: server.name || server.host,
     host: server.host,
     port: server.port ?? DEFAULTS.server.port,
     username: server.username,
@@ -103,6 +108,8 @@ function adaptServer(server) {
       max: server.retry?.max ?? DEFAULTS.server.retry.max,
       delay: server.retry?.delay ?? DEFAULTS.server.retry.delay,
     },
+    // 上传/下载基准目录：server 级优先，其次顶层，未配置则为 null（默认服务器主目录）
+    uploadBasedir: server['upload-basedir'] || defaultBasedir || null,
   };
 
   if (!Array.isArray(server.tasks) || server.tasks.length === 0) {

@@ -19,6 +19,9 @@
 - 📝 **JSON5 配置**：支持注释、尾逗号、单引号，运维友好
 - 🗜️ **ZIP 压缩**：全量备份自动压缩为 zip，节省存储空间
 - 🎯 **过滤规则**：增量备份支持 `include`/`exclude` glob 过滤（include 优先）
+- ⏸️ **断点续传**：`backup up` / `backup down` 传输中断后再次执行，自动从断点继续
+- 📊 **实时进度**：上传/下载时在命令行同一行显示进度百分比（不刷屏）
+- 🔀 **命令别名**：`bak` 与 `backup` 完全等价，可直接用 `bak` 替代
 
 ---
 
@@ -50,6 +53,7 @@ npm install lite-backup-tool -g -verbose
 {
   servers: [
     {
+      name: "prod",               // 可选：服务器名称（用于 backup up/down），默认用 host
       host: "192.168.1.100",
       username: "root",
       password: "your-password",
@@ -92,6 +96,8 @@ backup start /path/to/your-config.json5
 backup start my-config.json5  # 在 ~/.backup-tool 下查找
 ```
 
+> **命令别名**：`bak` 是 `backup` 的别名（npm 全局安装后自动生效），所有命令均可直接换成 `bak`，例如 `bak exec`、`bak up prod ./file`。
+
 ---
 
 ## 命令说明
@@ -99,11 +105,44 @@ backup start my-config.json5  # 在 ~/.backup-tool 下查找
 | 命令 | 说明 |
 |------|------|
 | `backup start [configFilePath]` | 启动备份服务（通过 PM2 常驻运行） |
+| `backup exec [configFilePath]` | 手动执行备份（跳过调度，立即执行所有任务） |
+| `backup up <server-name> <file/folder> [remote-path]` | 上传本地文件/目录到服务器（相对路径基于 `upload-basedir`） |
+| `backup down <server-name> <file/folder> [local-path]` | 从服务器下载文件/目录（相对路径基于 `upload-basedir`） |
 | `backup stop` | 停止备份服务 |
 | `backup clear` | 清除 PM2 中的实例 |
 | `backup reload [configFilePath]` | 重载配置并重启服务 |
 | `backup logs` | 查看服务日志 |
 | `backup help` | 显示帮助信息 |
+
+### 上传 / 下载示例
+
+`server-name` 对应配置中服务器的 `name` 字段，未配置时默认为 `host`。
+
+服务器上路径的解析规则（`upload-basedir` 为服务器配置的基准目录，可选）：
+
+- **绝对路径**（以 `/` 开头）：直接使用，不经过基准目录
+- **相对路径**：以 `upload-basedir` 为基准拼接
+- **不传远程路径**（仅上传）：默认上传到 `upload-basedir`；未配置时默认为服务器主目录
+
+```bash
+# 上传本地文件（未配置基于目录时到服务器主目录；配置了则到基于目录）
+backup up prod ./nginx.conf
+
+# 上传本地目录到服务器指定路径（绝对路径）
+backup up prod ./configs /etc/app
+
+# 上传本地目录到基于目录下的相对路径
+backup up prod ./configs app/configs
+
+# 下载服务器文件（绝对路径）
+backup down prod /etc/nginx/nginx.conf
+
+# 下载基于目录下的相对路径
+backup down prod conf.d/nginx.conf
+
+# 下载服务器目录到本地指定目录
+backup down prod /etc/nginx ./downloads
+```
 
 ### Cron 表达式说明
 
@@ -188,9 +227,14 @@ backup start my-config.json5  # 在 ~/.backup-tool 下查找
   servers: [
     {
       // ---- 连接信息 ----
+      name: "prod",                 // 可选：服务器名称（用于 backup up/down），默认用 host
       host: "192.168.1.100",        // 必填：SFTP 服务器地址
       port: 22,                     // 可选，默认 22
       username: "root",             // 必填：用户名
+
+      // ---- 上传/下载基准目录（可选） ----
+      // backup up/down 的相对路径均以它为基准；未配置时相对路径以服务器主目录为基准
+      // upload-basedir: "/srv/backup",
 
       // ---- 认证（自动判断，二选一即可） ----
       password: "your-password",    // 有此项 → 密码认证

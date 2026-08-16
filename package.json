@@ -1,15 +1,15 @@
 {
   "name": "lite-backup-tool",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "A lightweight SFTP backup tool supporting incremental and full backups",
   "main": "src/index.js",
   "bin": {
-    "backup": "bin/backup.js"
+    "backup": "bin/backup.js",
+    "bak": "bin/backup.js"
   },
   "files": [
     "bin/",
     "src/",
-    "config/",
     "README.md",
     "README.en.md",
     "LICENSE"

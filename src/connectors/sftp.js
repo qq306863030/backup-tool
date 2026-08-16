@@ -130,6 +130,181 @@ class SftpConnector {
   }
 
   /**
+   * 上传单个文件
+   * @param {string} localPath 本地文件路径
+   * @param {string} remotePath 远程文件路径
+   * @returns {Promise<void>}
+   */
+  async uploadFile(localPath, remotePath) {
+    try {
+      await this.client.fastPut(localPath, remotePath);
+    } catch (err) {
+      throw new ConnectionError(`上传文件失败 ${localPath}: ${err.message}`, err);
+    }
+  }
+
+  /**
+   * 断点续传下载单个文件
+   * 本地已有部分数据时从断点继续，完成后保持远程 mtime
+   * @param {string} remotePath 远程文件路径
+   * @param {string} localPath 本地文件路径
+   * @param {number|Date} [mtime] 远程修改时间，下载后设置到本地文件
+   * @param {Function} [onProgress] (transferred, total) => void 进度回调
+   * @returns {Promise<{status: string, transferred: number, total: number}>}
+   *          status: completed（完整下载）/ resumed（续传）/ skipped（已存在跳过）
+   */
+  async downloadResume(remotePath, localPath, mtime, onProgress) {
+    let total = 0;
+    try {
+      const stat = await this.client.stat(remotePath);
+      total = stat.size;
+    } catch (err) {
+      throw new ConnectionError(`获取远程文件信息失败 ${remotePath}: ${err.message}`, err);
+    }
+
+    let localSize = 0;
+    if (fs.existsSync(localPath)) {
+      localSize = fs.statSync(localPath).size;
+    }
+    fs.mkdirSync(path.dirname(localPath), { recursive: true });
+
+    // 本地大小已达到远程大小，视为已完成
+    if (localSize >= total) {
+      this.setMtime(localPath, mtime);
+      return { status: 'skipped', transferred: total, total };
+    }
+
+    let transferred = localSize;
+    let rs;
+    try {
+      // 从本地已有大小（断点）开始读取远程文件
+      rs = this.client.createReadStream(remotePath, { start: localSize });
+    } catch (err) {
+      throw new ConnectionError(`打开远程文件失败 ${remotePath}: ${err.message}`, err);
+    }
+    // 追加模式写入本地，保留已有部分
+    const ws = fs.createWriteStream(localPath, { flags: 'a' });
+
+    await new Promise((resolve, reject) => {
+      rs.on('data', (chunk) => {
+        transferred += chunk.length;
+        if (onProgress) onProgress(transferred, total);
+      });
+      rs.on('error', (err) => reject(new ConnectionError(`下载文件失败 ${remotePath}: ${err.message}`, err)));
+      ws.on('error', (err) => reject(new ConnectionError(`写入本地文件失败 ${localPath}: ${err.message}`, err)));
+      ws.on('finish', resolve);
+      rs.pipe(ws);
+    });
+
+    this.setMtime(localPath, mtime);
+    return { status: localSize > 0 ? 'resumed' : 'completed', transferred: total, total };
+  }
+
+  /**
+   * 断点续传上传单个文件
+   * 远程已有部分数据时从断点继续（以追加模式写入末尾）
+   * @param {string} localPath 本地文件路径
+   * @param {string} remotePath 远程文件路径
+   * @param {Function} [onProgress] (transferred, total) => void 进度回调
+   * @returns {Promise<{status: string, transferred: number, total: number}>}
+   *          status: completed（完整上传）/ resumed（续传）/ skipped（已存在跳过）
+   */
+  async uploadResume(localPath, remotePath, onProgress) {
+    const total = fs.statSync(localPath).size;
+    let remoteSize = 0;
+    try {
+      const stat = await this.client.stat(remotePath);
+      remoteSize = stat.size;
+    } catch (err) {
+      remoteSize = 0; // 远程文件不存在
+    }
+
+    // 远程大小已达到本地大小，视为已完成
+    if (remoteSize >= total) {
+      return { status: 'skipped', transferred: total, total };
+    }
+
+    // 使用底层 SFTP 原语：以追加模式（SSH_FXF_APPEND）打开远程文件，
+    // write 时 position 传 null，数据始终写入文件末尾，实现断点续传
+    const sftp = this.client.sftp;
+    const handle = await new Promise((resolve, reject) => {
+      sftp.open(remotePath, 'a', (err, h) => (err ? reject(err) : resolve(h)));
+    });
+
+    let transferred = remoteSize;
+    try {
+      const rs = fs.createReadStream(localPath, { start: remoteSize, highWaterMark: 64 * 1024 });
+      for await (const chunk of rs) {
+        // APPEND 模式（SSH_FXF_APPEND）下协议强制写入文件末尾，忽略 position，传 0 即可
+        await new Promise((resolve, reject) => {
+          sftp.write(handle, chunk, 0, chunk.length, 0, (err) =>
+            err ? reject(err) : resolve()
+          );
+        });
+        transferred += chunk.length;
+        if (onProgress) onProgress(transferred, total);
+      }
+    } catch (err) {
+      throw new ConnectionError(`上传文件失败 ${localPath}: ${err.message}`, err);
+    } finally {
+      await new Promise((resolve) => sftp.close(handle, () => resolve()));
+    }
+    return { status: remoteSize > 0 ? 'resumed' : 'completed', transferred: total, total };
+  }
+
+  /**
+   * 设置本地文件修改时间为远程 mtime
+   * @param {string} localPath
+   * @param {number|Date} [mtime]
+   */
+  setMtime(localPath, mtime) {
+    if (!mtime) return;
+    const ts = new Date(mtime).getTime();
+    if (!Number.isNaN(ts)) {
+      fs.utimesSync(localPath, new Date(), new Date(ts));
+    }
+  }
+
+  /**
+   * 确保远程目录存在（递归创建，已存在时忽略）
+   * @param {string} remotePath 远程目录路径
+   * @returns {Promise<void>}
+   */
+  async ensureRemoteDir(remotePath) {
+    try {
+      await this.client.mkdir(remotePath, true);
+    } catch (err) {
+      // 目录已存在时部分实现会报错，忽略即可
+    }
+  }
+
+  /**
+   * 获取远程真实路径（不传参数时返回登录主目录）
+   * @param {string} [remotePath]
+   * @returns {Promise<string>}
+   */
+  async realPath(remotePath) {
+    try {
+      return await this.client.realPath(remotePath || '.');
+    } catch (err) {
+      throw new ConnectionError(`获取远程路径失败: ${err.message}`, err);
+    }
+  }
+
+  /**
+   * 获取远程路径状态
+   * @param {string} remotePath 远程路径
+   * @returns {Promise<object>}
+   */
+  async stat(remotePath) {
+    try {
+      return await this.client.stat(remotePath);
+    } catch (err) {
+      throw new ConnectionError(`获取远程状态失败 ${remotePath}: ${err.message}`, err);
+    }
+  }
+
+  /**
    * 关闭连接
    * @returns {Promise<void>}
    */

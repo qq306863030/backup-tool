@@ -137,6 +137,10 @@ backup start my-config.json5  # 在 ~/.backup-tool 下查找
 | `backup clear` | 清除 PM2 中的实例 |
 | `backup reload [configFilePath]` | 重载配置并重启服务 |
 | `backup logs` | 查看服务日志 |
+| `backup add server` | 交互式添加服务器配置（向导模式） |
+| `backup add task` | 交互式添加备份/推送任务（向导模式） |
+| `backup view config [path]` | 在控制台打印当前配置文件内容 |
+| `backup view configPath` | 打印默认路径信息（配置目录、配置文件、日志目录、备份目录） |
 | `backup help` | 显示帮助信息 |
 
 ### 上传 / 下载示例

@@ -137,6 +137,10 @@ backup start my-config.json5  # searched in ~/.backup-tool
 | `backup clear` | Clear PM2 instance |
 | `backup reload [configFilePath]` | Reload config and restart |
 | `backup logs` | View service logs |
+| `backup add server` | Interactively add a server configuration (wizard) |
+| `backup add task` | Interactively add a backup/push task (wizard) |
+| `backup view config [path]` | Print current configuration content to console |
+| `backup view configPath` | Print default path information (config dir, config file, log dir, backup dir) |
 | `backup help` | Show help |
 
 ### Upload / Download examples

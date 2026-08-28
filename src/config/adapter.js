@@ -193,8 +193,10 @@ function adaptTask(task, host) {
   };
 
   if (task.type === 'incremental') {
+    // Push 模式默认只比较 size（远程 mtime 不可靠，因为无法保证设置成功）
+    const defaultCompareBy = direction === 'push' ? ['size'] : DEFAULTS.incremental.compareBy;
     adapted.incremental = {
-      compareBy: task.incremental?.compareBy ?? DEFAULTS.incremental.compareBy,
+      compareBy: task.incremental?.compareBy ?? defaultCompareBy,
       deleteRemoved: task.incremental?.deleteRemoved ?? DEFAULTS.incremental.deleteRemoved,
       include: normalizeArray(task.incremental?.include),
       exclude: normalizeArray(task.incremental?.exclude),

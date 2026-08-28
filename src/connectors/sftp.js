@@ -253,7 +253,7 @@ class SftpConnector {
   }
 
   /**
-   * 设置本地文件修改时间为远程 mtime
+   * 设置本地文件修改时间为远程 mtime（Pull 模式用）
    * @param {string} localPath
    * @param {number|Date} [mtime]
    */
@@ -262,6 +262,32 @@ class SftpConnector {
     const ts = new Date(mtime).getTime();
     if (!Number.isNaN(ts)) {
       fs.utimesSync(localPath, new Date(), new Date(ts));
+    }
+  }
+
+  /**
+   * 通过 SFTP 设置远程文件修改时间（Push 模式用）
+   * @param {string} remotePath 远程文件路径
+   * @param {number|Date} [mtime] 修改时间
+   */
+  async setRemoteMtime(remotePath, mtime) {
+    if (!mtime) return;
+    const mtimeDate = mtime instanceof Date ? mtime : new Date(mtime);
+    const ts = mtimeDate.getTime();
+    if (Number.isNaN(ts)) return;
+    try {
+      const sftp = this.client.sftp;
+      // 使用底层 SFTP 原语设置远程文件 mtime
+      const handle = await new Promise((resolve, reject) => {
+        sftp.open(remotePath, 'r', (err, h) => (err ? reject(err) : resolve(h)));
+      });
+      const attrs = { mtime: Math.floor(ts / 1000) };
+      await new Promise((resolve, reject) => {
+        sftp.fsetstat(handle, attrs, (err) => (err ? reject(err) : resolve()));
+      });
+      await new Promise((resolve) => sftp.close(handle, () => resolve()));
+    } catch (err) {
+      // 设置远程 mtime 失败不阻塞主流程
     }
   }
 
@@ -316,6 +342,32 @@ class SftpConnector {
         // 忽略关闭错误
       }
       this.connected = false;
+    }
+  }
+
+  /**
+   * 删除远程文件
+   * @param {string} remotePath
+   * @returns {Promise<void>}
+   */
+  async deleteFile(remotePath) {
+    try {
+      await this.client.delete(remotePath);
+    } catch (err) {
+      throw new ConnectionError(`删除远程文件失败 ${remotePath}: ${err.message}`, err);
+    }
+  }
+
+  /**
+   * 删除远程目录（递归）
+   * @param {string} remotePath
+   * @returns {Promise<void>}
+   */
+  async deleteDir(remotePath) {
+    try {
+      await this.client.rmdir(remotePath, true);
+    } catch (err) {
+      throw new ConnectionError(`删除远程目录失败 ${remotePath}: ${err.message}`, err);
     }
   }
 }

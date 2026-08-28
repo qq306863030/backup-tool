@@ -27,28 +27,31 @@ test('IncrementalPush: 正确对比并上传有差异/新增的文件', async ()
 
   const stat1 = fs.statSync(file1);
   const mockConnector = {
+    // connector.listFiles 返回 {name, path, size, mtime, isDirectory}
     listFiles: async () => [
       {
         name: 'file1.txt',
-        relativePath: 'file1.txt',
+        path: '/remote/dir/file1.txt',
         size: stat1.size,
-        mtime: stat1.mtime,
-        type: '-',
+        mtime: stat1.mtime.getTime(),
+        isDirectory: false,
       },
       {
         name: 'old.txt',
-        relativePath: 'old.txt',
+        path: '/remote/dir/old.txt',
         size: 10,
-        mtime: new Date(1000),
-        type: '-',
+        mtime: 1000,
+        isDirectory: false,
       },
     ],
-    upload: async (local, remote) => {
+    uploadResume: async (local, remote) => {
       uploadedFiles.push({ local, remote });
     },
-    remove: async (remote) => {
+    deleteFile: async (remote) => {
       deletedFiles.push(remote);
     },
+    ensureRemoteDir: async () => {},
+    setRemoteMtime: async () => {},
   };
 
   const pusher = new IncrementalPush(mockLogger);
@@ -85,21 +88,26 @@ test('FullPush: 非压缩模式上传所有文件并清理远程超期版本', a
   const deletedRemotes = [];
 
   const mockConnector = {
+    // connector.listFiles 返回 {name, path, size, mtime, isDirectory}
     listFiles: async (dir) => {
       if (dir === '/remote/backups') {
         return [
-          { name: 'full-task_20260101-000000', type: 'd' },
-          { name: 'full-task_20260102-000000', type: 'd' },
-          { name: 'full-task_20260103-000000', type: 'd' },
-          { name: 'full-task_20260828-120000', type: 'd' }, // 模拟刚上传的新版本
+          { name: 'full-task_20260101-000000', path: '/remote/backups/full-task_20260101-000000', isDirectory: true, mtime: 100, size: 0 },
+          { name: 'full-task_20260102-000000', path: '/remote/backups/full-task_20260102-000000', isDirectory: true, mtime: 200, size: 0 },
+          { name: 'full-task_20260103-000000', path: '/remote/backups/full-task_20260103-000000', isDirectory: true, mtime: 300, size: 0 },
+          { name: 'full-task_20260828-120000', path: '/remote/backups/full-task_20260828-120000', isDirectory: true, mtime: 400, size: 0 },
         ];
       }
       return [];
     },
-    upload: async (local, remote) => {
+    ensureRemoteDir: async () => {},
+    uploadResume: async (local, remote) => {
       uploadedFiles.push({ local, remote });
     },
-    remove: async (remote) => {
+    deleteFile: async (remote) => {
+      deletedRemotes.push(remote);
+    },
+    deleteDir: async (remote) => {
       deletedRemotes.push(remote);
     },
   };

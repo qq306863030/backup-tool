@@ -3,7 +3,7 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { formatTimestamp, buildBackupDirName, isBackupDir, extractTimestamp, toPosixPath } = require('../utils/path');
+const { formatTimestamp, buildBackupDirName, isBackupDir, extractTimestamp, toRelativePath, toPosixPath } = require('../utils/path');
 const { compressDir } = require('../utils/compress');
 const { LocalStorage } = require('../storage/local-storage');
 
@@ -42,9 +42,11 @@ class FullPush {
       const tmpZipPath = path.join(os.tmpdir(), `${backupDirName}.zip`);
       try {
         await compressDir(source, tmpZipPath, { exclude });
+        // 确保远程目标目录存在
+        await connector.ensureRemoteDir(remoteDestDir);
         const remoteZipTarget = toPosixPath(path.posix.join(remoteDestDir, `${backupDirName}.zip`));
         this.logger.info(`[full-push] ${name}: 上传压缩包 ${tmpZipPath} -> ${remoteZipTarget}`);
-        await connector.upload(tmpZipPath, remoteZipTarget);
+        await connector.uploadResume(tmpZipPath, remoteZipTarget);
         uploadedCount = allLocalRelPaths.length;
       } finally {
         if (fs.existsSync(tmpZipPath)) {
@@ -54,10 +56,16 @@ class FullPush {
     } else {
       // 非压缩模式：在远程创建版本目录，逐个上传文件
       const remoteTargetBase = toPosixPath(path.posix.join(remoteDestDir, backupDirName));
+      await connector.ensureRemoteDir(remoteTargetBase);
       for (const rel of allLocalRelPaths) {
         const localFullPath = path.resolve(source, rel);
         const remoteTarget = toPosixPath(path.posix.join(remoteTargetBase, toPosixPath(rel)));
-        await connector.upload(localFullPath, remoteTarget);
+        // 确保远程子目录存在（处理源目录有嵌套子目录的情况）
+        const remoteParentDir = toPosixPath(path.posix.dirname(remoteTarget));
+        if (remoteParentDir !== remoteTargetBase) {
+          await connector.ensureRemoteDir(remoteParentDir);
+        }
+        await connector.uploadResume(localFullPath, remoteTarget);
         uploadedCount++;
       }
     }
@@ -78,6 +86,7 @@ class FullPush {
 
   /**
    * 清理远程过期的历史备份版本
+   * connector.listFiles 返回 {name, path, size, mtime, isDirectory}
    */
   async _cleanRemoteRetention(connector, remoteDestDir, taskName, maxBackups) {
     if (!maxBackups || maxBackups <= 0) return 0;
@@ -92,8 +101,12 @@ class FullPush {
 
     const backups = [];
     for (const entry of entries) {
-      const isDir = entry.type === 'd';
-      const isZip = entry.type === '-' && entry.name.endsWith('.zip');
+      // 只处理顶层条目（直接位于 remoteDestDir 下的文件或目录）
+      const relPath = toRelativePath(entry.path, remoteDestDir);
+      if (relPath.includes('/') || relPath.includes('\\')) continue;
+
+      const isDir = entry.isDirectory;
+      const isZip = !isDir && entry.name.endsWith('.zip');
       if (!isDir && !isZip) continue;
 
       const baseName = isZip ? entry.name.slice(0, -4) : entry.name;
@@ -104,7 +117,8 @@ class FullPush {
       backups.push({
         name: entry.name,
         timestamp: ts,
-        fullPath: toPosixPath(path.posix.join(remoteDestDir, entry.name)),
+        fullPath: toPosixPath(entry.path),
+        isDir,
       });
     }
 
@@ -120,7 +134,11 @@ class FullPush {
     for (const item of toDelete) {
       this.logger.info(`[full-push] [retention] ${taskName}: 清理远程旧版本 ${item.name}`);
       try {
-        await connector.remove(item.fullPath);
+        if (item.isDir) {
+          await connector.deleteDir(item.fullPath);
+        } else {
+          await connector.deleteFile(item.fullPath);
+        }
         cleaned++;
       } catch (err) {
         this.logger.warn(`[full-push] [retention] ${taskName}: 清理远程旧版本失败 ${item.fullPath}: ${err.message}`);

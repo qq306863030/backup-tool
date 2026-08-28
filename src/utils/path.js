@@ -85,6 +85,16 @@ function toRelativePath(remotePath, source) {
   return remotePath;
 }
 
+/**
+ * 将路径中的反斜杠统一转换为 POSIX 正斜杠
+ * @param {string} p
+ * @returns {string}
+ */
+function toPosixPath(p) {
+  if (!p) return '';
+  return p.replace(/\\/g, '/');
+}
+
 module.exports = {
   formatTimestamp,
   buildBackupDirName,
@@ -92,4 +102,5 @@ module.exports = {
   isBackupDir,
   safeJoin,
   toRelativePath,
+  toPosixPath,
 };

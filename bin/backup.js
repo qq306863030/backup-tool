@@ -6,8 +6,8 @@
  * 用法：
  *   backup start [configFilePath]   启动备份服务（通过 PM2 常驻）
  *   backup exec [configFilePath]    手动执行备份（跳过调度）
- *   backup up <server-name> <file/folder> [remote-path]   上传文件/目录到服务器（相对路径基于 upload-basedir）
- *   backup down <server-name> <file/folder> [local-path]  从服务器下载文件/目录（相对路径基于 upload-basedir）
+ *   backup push <server-name> <file/folder> [remote-path]  上传文件/目录到服务器（别名: up，相对路径基于 upload-basedir）
+ *   backup pull <server-name> <file/folder> [local-path]   从服务器下载文件/目录（别名: down，相对路径基于 upload-basedir）
  *   backup stop                     停止备份服务
  *   backup clear                    清除 PM2 中的实例
  *   backup reload                   重载配置并重启服务
@@ -32,8 +32,8 @@ backup - 从远程服务器(SFTP)自动拉取文件备份工具（别名: bak）
 用法:
   backup start [configFilePath]   启动备份服务（常驻运行）
   backup exec [configFilePath]    手动执行备份（跳过调度，立即执行所有任务）
-  backup up <server-name> <file/folder> [remote-path]   上传文件/目录到服务器
-  backup down <server-name> <file/folder> [local-path]  从服务器下载文件/目录
+  backup push <server-name> <file/folder> [remote-path]  上传文件/目录到服务器（别名: up）
+  backup pull <server-name> <file/folder> [local-path]   从服务器下载文件/目录（别名: down）
   backup stop                     停止备份服务
   backup clear                    清除 PM2 中的实例
   backup reload                   重载配置并重启服务
@@ -46,10 +46,10 @@ backup - 从远程服务器(SFTP)自动拉取文件备份工具（别名: bak）
                   - 文件名（在 ~/.backup-tool 下查找）
                   - 不传则使用默认 ~/.backup-tool/backup.config.json5
 
-服务器路径解析（backup up/down）：
+服务器路径解析（backup push/pull）：
   - 绝对路径（以 / 开头）直接使用
   - 相对路径以配置的 upload-basedir 为基准（未配置则以服务器主目录为基准）
-  - up 不传远程路径时默认上传到 upload-basedir（未配置则为服务器主目录）
+  - push 不传远程路径时默认上传到 upload-basedir（未配置则为服务器主目录）
 
 目录:
   配置目录: ${HOME_DIR}
@@ -131,16 +131,16 @@ function cmdExec(configFilePath) {
   }
 }
 
-// up 命令：上传本地文件/目录到服务器
-async function cmdUp(serverName, localPath, remotePath) {
+// push 命令：上传本地文件/目录到服务器（别名: up）
+async function cmdPush(serverName, localPath, remotePath) {
   if (!serverName || !localPath) {
-    console.error('[backup] 用法: backup up <server-name> <local-file/folder> [remote-path]');
+    console.error('[backup] 用法: backup push <server-name> <local-file/folder> [remote-path]（别名: backup up）');
     process.exit(1);
   }
   const configPath = resolveConfigOrExit();
   try {
     console.log(`[backup] 上传: ${localPath} -> ${serverName}${remotePath ? ':' + remotePath : '（服务器主目录）'}`);
-    await runTransfer(configPath, 'up', serverName, localPath, remotePath);
+    await runTransfer(configPath, 'push', serverName, localPath, remotePath);
     console.log('[backup] 上传完成');
   } catch (err) {
     console.error('[backup] 上传失败:', err.message);
@@ -148,22 +148,26 @@ async function cmdUp(serverName, localPath, remotePath) {
   }
 }
 
-// down 命令：下载服务器文件/目录到本地
-async function cmdDown(serverName, remotePath, localPath) {
+// pull 命令：下载服务器文件/目录到本地（别名: down）
+async function cmdPull(serverName, remotePath, localPath) {
   if (!serverName || !remotePath) {
-    console.error('[backup] 用法: backup down <server-name> <remote-file/folder> [local-path]');
+    console.error('[backup] 用法: backup pull <server-name> <remote-file/folder> [local-path]（别名: backup down）');
     process.exit(1);
   }
   const configPath = resolveConfigOrExit();
   try {
     console.log(`[backup] 下载: ${serverName}:${remotePath} -> ${localPath || '本地当前目录'}`);
-    await runTransfer(configPath, 'down', serverName, remotePath, localPath);
+    await runTransfer(configPath, 'pull', serverName, remotePath, localPath);
     console.log('[backup] 下载完成');
   } catch (err) {
     console.error('[backup] 下载失败:', err.message);
     process.exit(1);
   }
 }
+
+// 别名保留兼容
+const cmdUp = cmdPush;
+const cmdDown = cmdPull;
 
 // stop 命令
 function cmdStop() {
@@ -243,11 +247,13 @@ function main() {
     case 'exec':
       cmdExec(args[1]);
       break;
+    case 'push':
     case 'up':
-      cmdUp(args[1], args[2], args[3]);
+      cmdPush(args[1], args[2], args[3]);
       break;
+    case 'pull':
     case 'down':
-      cmdDown(args[1], args[2], args[3]);
+      cmdPull(args[1], args[2], args[3]);
       break;
     case 'stop':
       cmdStop();

@@ -20,6 +20,7 @@ const DEFAULTS = {
     retry: { max: 3, delay: 5000 },
   },
   task: {
+    direction: 'pull',
     enabled: true,
     destination: DEFAULT_BACKUP_DIR,
   },
@@ -162,14 +163,33 @@ function adaptTask(task, host) {
   if (!task.cron) throw new ConfigError(`任务 ${task.name} 缺少 cron`);
   if (!task.source) throw new ConfigError(`任务 ${task.name} 缺少 source`);
 
+  const direction = task.direction || DEFAULTS.task.direction;
+  if (!['pull', 'push'].includes(direction)) {
+    throw new ConfigError(`任务 ${task.name} 的 direction 必须是 pull 或 push`);
+  }
+
+  // pull 模式: source 为远端路径，destination 为本地路径(可选，默认 ~/.backup-tool/backups/<name>)
+  // push 模式: source 为本地路径(展开~)，destination 为远端路径(必填)
+  let source = task.source;
+  let destination = task.destination;
+
+  if (direction === 'push') {
+    source = expandHome(source);
+    if (!destination) {
+      throw new ConfigError(`推送任务 ${task.name} 缺少远端 destination`);
+    }
+  } else {
+    destination = expandHome(destination || path.join(DEFAULTS.task.destination, task.name));
+  }
+
   const adapted = {
     name: task.name,
+    direction,
     enabled: task.enabled ?? DEFAULTS.task.enabled,
     type: task.type,
     cron: task.cron,
-    source: task.source,
-    // destination 可选，默认 ~/.backup-tool/backups/<name>，并展开 ~
-    destination: expandHome(task.destination || path.join(DEFAULTS.task.destination, task.name)),
+    source,
+    destination,
   };
 
   if (task.type === 'incremental') {

@@ -19,9 +19,10 @@
 - 📝 **JSON5 config**: Supports comments, trailing commas, and single quotes.
 - 🗜️ **ZIP compression**: Full backups are auto-compressed to zip.
 - 🎯 **Filter rules**: Incremental backup supports `include`/`exclude` glob filters (include takes priority).
-- ⏸️ **Resumable transfer**: `backup up` / `backup down` resume automatically from where they left off after an interruption.
+- ⏸️ **Resumable transfer**: `backup push` / `backup pull` (or `up` / `down`) resume automatically from where they left off after an interruption.
 - 📊 **Live progress**: Upload/download progress is shown in place on a single console line (no scrolling).
 - 🔀 **Command alias**: `bak` is fully equivalent to `backup`.
+- ↕️ **Direction control**: The `direction` field in task config defaults to `"pull"` (fetch), set to `"push"` for incremental or full local-to-remote file synchronization.
 
 ---
 
@@ -53,23 +54,25 @@ Create a config file at `~/.backup-tool/backup.config.json5` (the directory is a
 {
   servers: [
     {
-      name: "prod",               // Optional: server name (used by backup up/down), defaults to host
+      name: "prod",               // Optional: server name (used by backup push/pull), defaults to host
       host: "192.168.1.100",
       username: "root",
       password: "your-password",
 
       tasks: [
-        // Incremental backup: sync files at 2 AM daily
+        // 1. Incremental Backup (Pull): sync files at 2 AM daily
         {
           name: "data",
+          direction: "pull",          // default: pull
           type: "incremental",
           cron: "0 2 * * *",
           source: "/data",
           destination: "~/.backup-tool/backups/data",
         },
-        // Full backup: full backup at 3 AM every Sunday
+        // 2. Full Backup (Pull): full backup at 3 AM every Sunday
         {
           name: "config",
+          direction: "pull",
           type: "full",
           cron: "0 3 * * 0",
           source: "/etc/nginx",
@@ -77,6 +80,28 @@ Create a config file at `~/.backup-tool/backup.config.json5` (the directory is a
           full: {
             maxBackups: 5,
             compress: true,
+          },
+        },
+        // 3. Incremental Push: sync local changed files to remote server hourly
+        {
+          name: "sync-assets",
+          direction: "push",          // push mode (local -> remote)
+          type: "incremental",
+          cron: "0 * * * *",
+          source: "./public/assets",
+          destination: "/var/www/assets",
+        },
+        // 4. Full Push: deploy local build with timestamped releases & remote retention
+        {
+          name: "deploy-dist",
+          direction: "push",          // push mode (local -> remote)
+          type: "full",
+          cron: "0 4 * * *",
+          source: "./dist",
+          destination: "/var/releases",
+          full: {
+            maxBackups: 3,            // retain latest 3 releases on remote server
+            compress: true,           // compress as zip before uploading
           },
         },
       ],
@@ -96,7 +121,7 @@ backup start /path/to/your-config.json5
 backup start my-config.json5  # searched in ~/.backup-tool
 ```
 
-> **Alias**: `bak` is an alias for `backup` (available after global npm install). Every command works with `bak` too, e.g. `bak exec`, `bak up prod ./file`.
+> **Alias**: `bak` is an alias for `backup` (available after global npm install). Every command works with `bak` too, e.g. `bak exec`, `bak push prod ./file`.
 
 ---
 
@@ -106,8 +131,8 @@ backup start my-config.json5  # searched in ~/.backup-tool
 |------|------|
 | `backup start [configFilePath]` | Start backup service (PM2 daemon) |
 | `backup exec [configFilePath]` | Run all enabled tasks immediately (skip scheduling) |
-| `backup up <server-name> <file/folder> [remote-path]` | Upload a local file/folder to the server (relative paths are based on `upload-basedir`) |
-| `backup down <server-name> <file/folder> [local-path]` | Download a file/folder from the server (relative paths are based on `upload-basedir`) |
+| `backup push <server-name> <file/folder> [remote-path]` | Upload a local file/folder to the server (alias: `up`, relative paths are based on `upload-basedir`) |
+| `backup pull <server-name> <file/folder> [local-path]` | Download a file/folder from the server (alias: `down`, relative paths are based on `upload-basedir`) |
 | `backup stop` | Stop backup service |
 | `backup clear` | Clear PM2 instance |
 | `backup reload [configFilePath]` | Reload config and restart |
@@ -122,26 +147,26 @@ Remote path resolution rules (`upload-basedir` is the optional base directory co
 
 - **Absolute paths** (starting with `/`): used as-is, bypass the base directory.
 - **Relative paths**: resolved against `upload-basedir`.
-- **No remote path given** (upload only): defaults to `upload-basedir`; if unset, defaults to the server home directory.
+- **No remote path given** (push/upload only): defaults to `upload-basedir`; if unset, defaults to the server home directory.
 
 ```bash
 # Upload a local file (to the home directory if no base dir, or to the base dir if configured)
-backup up prod ./nginx.conf
+backup push prod ./nginx.conf
 
 # Upload a local folder to an absolute remote path
-backup up prod ./configs /etc/app
+backup push prod ./configs /etc/app
 
 # Upload a local folder to a relative path under the base dir
-backup up prod ./configs app/configs
+backup push prod ./configs app/configs
 
 # Download a remote file (absolute path)
-backup down prod /etc/nginx/nginx.conf
+backup pull prod /etc/nginx/nginx.conf
 
 # Download a relative path under the base dir
-backup down prod conf.d/nginx.conf
+backup pull prod conf.d/nginx.conf
 
 # Download a remote folder to a local directory
-backup down prod /etc/nginx ./downloads
+backup pull prod /etc/nginx ./downloads
 ```
 
 > Transfers support **resumable upload/download** and show **live progress** on a single console line.
@@ -229,13 +254,13 @@ If the config file does not exist, an error is reported and the process exits.
   servers: [
     {
       // ---- Connection info ----
-      name: "prod",                 // Optional: server name (used by backup up/down), defaults to host
+      name: "prod",                 // Optional: server name (used by backup push/pull), defaults to host
       host: "192.168.1.100",        // Required: SFTP server address
       port: 22,                     // Optional, default 22
       username: "root",             // Required: username
 
       // ---- Upload/download base directory (optional) ----
-      // Relative paths of backup up/down are resolved against it; if unset, they are
+      // Relative paths of backup push/pull are resolved against it; if unset, they are
       // resolved against the server home directory
       // upload-basedir: "/srv/backup",
 
@@ -250,10 +275,11 @@ If the config file does not exist, an error is reported and the process exits.
 
       // ---- Tasks for this server (multiple allowed) ----
       tasks: [
-        // ---------- Incremental backup ----------
+        // ---------- Incremental backup (pull mode) ----------
         {
           name: "data",                  // Required: task name
           enabled: true,                 // Optional, default true
+          direction: "pull",             // Optional: "pull" (default) or "push"
           type: "incremental",           // Required: incremental | full
           cron: "0 2 * * *",             // Required: cron expression
           source: "/data",               // Required: remote source path
@@ -273,10 +299,11 @@ If the config file does not exist, an error is reported and the process exits.
           },
         },
 
-        // ---------- Full backup ----------
+        // ---------- Full backup (pull mode) ----------
         {
           name: "nginx",
           enabled: true,
+          direction: "pull",
           type: "full",
           cron: "0 3 * * 0",
           source: "/etc/nginx",
@@ -291,6 +318,41 @@ If the config file does not exist, an error is reported and the process exits.
             compress: true,
             // Exclude rules, default []
             exclude: ["*.log"],
+          },
+        },
+
+        // ---------- Incremental push (local -> remote) ----------
+        {
+          name: "sync-assets",
+          enabled: true,
+          direction: "push",             // Push mode: local -> remote
+          type: "incremental",
+          cron: "0 * * * *",             // Every hour
+          source: "./public/assets",     // Local source path
+          destination: "/var/www/assets", // Remote destination path
+
+          incremental: {
+            compareBy: ["size", "mtime"],
+            deleteRemoved: false,
+            include: [],
+            exclude: ["*.tmp"],
+          },
+        },
+
+        // ---------- Full push (with version retention) ----------
+        {
+          name: "deploy-dist",
+          enabled: true,
+          direction: "push",             // Push mode: local -> remote
+          type: "full",
+          cron: "0 4 * * *",             // Every day at 4 AM
+          source: "./dist",              // Local build output directory
+          destination: "/var/releases",  // Remote release root directory
+
+          full: {
+            maxBackups: 3,               // Keep latest 3 releases on remote, auto-clean older
+            compress: true,              // Compress as zip before uploading
+            timestampFormat: "YYYYMMDD-HHmmss",
           },
         },
       ],

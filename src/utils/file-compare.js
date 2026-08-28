@@ -5,15 +5,15 @@
  */
 
 /**
- * 判断本地文件与远程文件是否需要同步（增量备份核心逻辑）
- * @param {object} remote 远程文件信息 { name, size, mtime }
+ * 判断本地文件与远程文件是否需要同步（增量备份与增量推送核心逻辑）
+ * @param {object|null} remote 远程文件信息 { name, size, mtime }，不存在为 null
  * @param {object|null} local 本地文件信息 { size, mtime }，不存在为 null
  * @param {string[]} compareBy 比较依据数组，可包含 name/size/mtime
- * @returns {boolean} true 表示需要下载
+ * @returns {boolean} true 表示需要同步
  */
 function needsSync(remote, local, compareBy = ['name', 'size', 'mtime']) {
-  // 本地不存在 → 需要下载
-  if (!local) return true;
+  // 一方不存在，说明需要同步（下载或上传）
+  if (!local || !remote) return true;
 
   for (const key of compareBy) {
     switch (key) {

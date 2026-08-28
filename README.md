@@ -19,9 +19,10 @@
 - 📝 **JSON5 配置**：支持注释、尾逗号、单引号，运维友好
 - 🗜️ **ZIP 压缩**：全量备份自动压缩为 zip，节省存储空间
 - 🎯 **过滤规则**：增量备份支持 `include`/`exclude` glob 过滤（include 优先）
-- ⏸️ **断点续传**：`backup up` / `backup down` 传输中断后再次执行，自动从断点继续
+- ⏸️ **断点续传**：`backup push` / `backup pull`（或 `up` / `down`）传输中断后再次执行，自动从断点继续
 - 📊 **实时进度**：上传/下载时在命令行同一行显示进度百分比（不刷屏）
 - 🔀 **命令别名**：`bak` 与 `backup` 完全等价，可直接用 `bak` 替代
+- ↕️ **方向控制**：任务配置中 `direction` 字段为空时默认使用 `"pull"`（拉取），设置为 `"push"` 时可实现本地文件增量/全量推送到服务器
 
 ---
 
@@ -53,23 +54,25 @@ npm install lite-backup-tool -g -verbose
 {
   servers: [
     {
-      name: "prod",               // 可选：服务器名称（用于 backup up/down），默认用 host
+      name: "prod",               // 可选：服务器名称（用于 backup push/pull），默认用 host
       host: "192.168.1.100",
       username: "root",
       password: "your-password",
 
       tasks: [
-        // 增量备份：每天凌晨 2 点同步文件
+        // 1. 增量备份 (Pull 模式)：每天凌晨 2 点同步远程文件到本地
         {
           name: "data",
+          direction: "pull",          // 默认 pull (拉取到本地)
           type: "incremental",
           cron: "0 2 * * *",
           source: "/data",
           destination: "~/.backup-tool/backups/data",
         },
-        // 全量备份：每周日凌晨 3 点全量备份目录
+        // 2. 全量备份 (Pull 模式)：每周日凌晨 3 点全量备份目录
         {
           name: "config",
+          direction: "pull",
           type: "full",
           cron: "0 3 * * 0",
           source: "/etc/nginx",
@@ -77,6 +80,28 @@ npm install lite-backup-tool -g -verbose
           full: {
             maxBackups: 5,
             compress: true,
+          },
+        },
+        // 3. 增量推送 (Push 模式)：每小时自动将本地文件增量推送到服务器
+        {
+          name: "sync-assets",
+          direction: "push",          // 声明为 push (本地 -> 服务器)
+          type: "incremental",
+          cron: "0 * * * *",
+          source: "./public/assets",
+          destination: "/var/www/assets",
+        },
+        // 4. 全量推送 (Push 模式)：每日发布/推送到服务器独立版本目录并保留指定份数
+        {
+          name: "deploy-dist",
+          direction: "push",          // 声明为 push (本地 -> 服务器)
+          type: "full",
+          cron: "0 4 * * *",
+          source: "./dist",
+          destination: "/var/releases",
+          full: {
+            maxBackups: 3,            // 远程保留最近 3 个历史发布版本，超出自动清理
+            compress: true,           // 本地打包为 zip 上传到服务器
           },
         },
       ],
@@ -96,7 +121,7 @@ backup start /path/to/your-config.json5
 backup start my-config.json5  # 在 ~/.backup-tool 下查找
 ```
 
-> **命令别名**：`bak` 是 `backup` 的别名（npm 全局安装后自动生效），所有命令均可直接换成 `bak`，例如 `bak exec`、`bak up prod ./file`。
+> **命令别名**：`bak` 是 `backup` 的别名（npm 全局安装后自动生效），所有命令均可直接换成 `bak`，例如 `bak exec`、`bak push prod ./file`。
 
 ---
 
@@ -106,8 +131,8 @@ backup start my-config.json5  # 在 ~/.backup-tool 下查找
 |------|------|
 | `backup start [configFilePath]` | 启动备份服务（通过 PM2 常驻运行） |
 | `backup exec [configFilePath]` | 手动执行备份（跳过调度，立即执行所有任务） |
-| `backup up <server-name> <file/folder> [remote-path]` | 上传本地文件/目录到服务器（相对路径基于 `upload-basedir`） |
-| `backup down <server-name> <file/folder> [local-path]` | 从服务器下载文件/目录（相对路径基于 `upload-basedir`） |
+| `backup push <server-name> <file/folder> [remote-path]` | 上传本地文件/目录到服务器（别名: `up`，相对路径基于 `upload-basedir`） |
+| `backup pull <server-name> <file/folder> [local-path]` | 从服务器下载文件/目录（别名: `down`，相对路径基于 `upload-basedir`） |
 | `backup stop` | 停止备份服务 |
 | `backup clear` | 清除 PM2 中的实例 |
 | `backup reload [configFilePath]` | 重载配置并重启服务 |
@@ -122,26 +147,26 @@ backup start my-config.json5  # 在 ~/.backup-tool 下查找
 
 - **绝对路径**（以 `/` 开头）：直接使用，不经过基准目录
 - **相对路径**：以 `upload-basedir` 为基准拼接
-- **不传远程路径**（仅上传）：默认上传到 `upload-basedir`；未配置时默认为服务器主目录
+- **不传远程路径**（仅上传 push）：默认上传到 `upload-basedir`；未配置时默认为服务器主目录
 
 ```bash
 # 上传本地文件（未配置基于目录时到服务器主目录；配置了则到基于目录）
-backup up prod ./nginx.conf
+backup push prod ./nginx.conf
 
 # 上传本地目录到服务器指定路径（绝对路径）
-backup up prod ./configs /etc/app
+backup push prod ./configs /etc/app
 
 # 上传本地目录到基于目录下的相对路径
-backup up prod ./configs app/configs
+backup push prod ./configs app/configs
 
 # 下载服务器文件（绝对路径）
-backup down prod /etc/nginx/nginx.conf
+backup pull prod /etc/nginx/nginx.conf
 
 # 下载基于目录下的相对路径
-backup down prod conf.d/nginx.conf
+backup pull prod conf.d/nginx.conf
 
 # 下载服务器目录到本地指定目录
-backup down prod /etc/nginx ./downloads
+backup pull prod /etc/nginx ./downloads
 ```
 
 ### Cron 表达式说明
@@ -227,13 +252,13 @@ backup down prod /etc/nginx ./downloads
   servers: [
     {
       // ---- 连接信息 ----
-      name: "prod",                 // 可选：服务器名称（用于 backup up/down），默认用 host
+      name: "prod",                 // 可选：服务器名称（用于 backup push/pull），默认用 host
       host: "192.168.1.100",        // 必填：SFTP 服务器地址
       port: 22,                     // 可选，默认 22
       username: "root",             // 必填：用户名
 
       // ---- 上传/下载基准目录（可选） ----
-      // backup up/down 的相对路径均以它为基准；未配置时相对路径以服务器主目录为基准
+      // backup push/pull 的相对路径均以它为基准；未配置时相对路径以服务器主目录为基准
       // upload-basedir: "/srv/backup",
 
       // ---- 认证（自动判断，二选一即可） ----
@@ -247,10 +272,11 @@ backup down prod /etc/nginx ./downloads
 
       // ---- 该服务器下的备份任务（可多个） ----
       tasks: [
-        // ---------- 增量备份 ----------
+        // ---------- 增量备份 (拉取模式) ----------
         {
           name: "data",                  // 必填：任务名称（用于日志与全量备份目录名）
           enabled: true,                 // 可选，是否启用，默认 true
+          direction: "pull",             // 可选：任务方向，pull（拉取）或 push（推送），默认 pull
           type: "incremental",           // 必填：incremental | full
           cron: "0 2 * * *",             // 必填：cron 表达式（分 时 日 月 周）
           source: "/data",               // 必填：远程源路径（文件或目录）
@@ -270,10 +296,11 @@ backup down prod /etc/nginx ./downloads
           },
         },
 
-        // ---------- 全量备份 ----------
+        // ---------- 全量备份 (拉取模式) ----------
         {
           name: "nginx",
           enabled: true,
+          direction: "pull",
           type: "full",
           cron: "0 3 * * 0",
           source: "/etc/nginx",
@@ -288,6 +315,41 @@ backup down prod /etc/nginx ./downloads
             compress: true,
             // 排除规则，默认 []
             exclude: ["*.log"],
+          },
+        },
+
+        // ---------- 增量推送 (推送到远程服务器) ----------
+        {
+          name: "sync-assets",
+          enabled: true,
+          direction: "push",             // 推送模式：本地 -> 服务器
+          type: "incremental",
+          cron: "0 * * * *",             // 每小时执行
+          source: "./public/assets",     // 本地源路径
+          destination: "/var/www/assets", // 远程目标路径
+
+          incremental: {
+            compareBy: ["size", "mtime"],
+            deleteRemoved: false,
+            include: [],
+            exclude: ["*.tmp"],
+          },
+        },
+
+        // ---------- 全量推送 (带版本保留的发布) ----------
+        {
+          name: "deploy-dist",
+          enabled: true,
+          direction: "push",             // 推送模式：本地 -> 服务器
+          type: "full",
+          cron: "0 4 * * *",             // 每天凌晨 4 点执行
+          source: "./dist",              // 本地构建输出目录
+          destination: "/var/releases",  // 远程发布根目录
+
+          full: {
+            maxBackups: 3,               // 远程保留最近 3 个历史版本，超出自动清理
+            compress: true,              // 本地打包为 zip 上传到服务器
+            timestampFormat: "YYYYMMDD-HHmmss",
           },
         },
       ],

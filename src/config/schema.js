@@ -49,6 +49,9 @@ function validateServer(server) {
 
 function validateTask(task, host) {
   if (!task.name) throw new ConfigError(`服务器 ${host} 的任务缺少 name`);
+  if (task.direction && !['pull', 'push'].includes(task.direction)) {
+    throw new ConfigError(`任务 ${task.name} 的 direction 非法`);
+  }
   if (!['incremental', 'full'].includes(task.type)) {
     throw new ConfigError(`任务 ${task.name} 的 type 非法`);
   }

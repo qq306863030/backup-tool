@@ -240,9 +240,9 @@ function resolveRemote(basedir, p) {
 }
 
 /**
- * 执行上传/下载（backup up / backup down 入口）
+ * 执行上传/下载（backup push/pull 或 backup up/down 入口）
  * @param {string} configPath 配置文件路径
- * @param {'up'|'down'} action 操作类型
+ * @param {'push'|'pull'|'up'|'down'} action 操作类型
  * @param {string} serverName 服务器名称或 host
  * @param {string} source 源路径（上传为本地路径，下载为远程路径）
  * @param {string} [target] 目标路径（可选：上传默认服务器 basedir，下载默认本地当前目录）
@@ -260,26 +260,30 @@ async function runTransfer(configPath, action, serverName, source, target) {
     throw new Error(`未找到服务器 "${serverName}"，可用服务器: ${names}`);
   }
 
+  const isUpload = action === 'push' || action === 'up';
+  const isDownload = action === 'pull' || action === 'down';
+  if (!isUpload && !isDownload) {
+    throw new Error(`未知操作: ${action}`);
+  }
+
   const logger = initLogger(config.log);
-  const actionText = action === 'up' ? '上传' : '下载';
+  const actionText = isUpload ? '上传' : '下载';
   logger.info(`[transfer] ${actionText}开始: ${serverName} ${source}${target ? ` -> ${target}` : ''}`);
 
   const connector = new SftpConnector(server);
   try {
     await connector.connect();
     const runner = new TransferRunner(logger);
-    if (action === 'up') {
+    if (isUpload) {
       // 上传：目标远程目录解析（默认 basedir，未配置 basedir 时默认服务器主目录）
       const remoteDir = resolveRemote(server.uploadBasedir, target) || (await connector.realPath());
       await runner.upload(connector, source, remoteDir);
-    } else if (action === 'down') {
+    } else {
       // 下载：源远程路径解析（相对路径以 basedir 为基准）
       const remotePath = resolveRemote(server.uploadBasedir, source);
       // 下载：默认目标为本地当前目录
       const localDir = target || process.cwd();
       await runner.download(connector, remotePath, localDir);
-    } else {
-      throw new Error(`未知操作: ${action}`);
     }
     logger.info('[transfer] 操作完成');
   } finally {

@@ -74,10 +74,64 @@ test('adaptConfig: 填充默认值', () => {
   assert.strictEqual(server.auth.type, 'password');
 
   const task = server.tasks[0];
+  assert.strictEqual(task.direction, 'pull');
   assert.strictEqual(task.enabled, true);
   assert.deepStrictEqual(task.incremental.compareBy, ['name', 'size', 'mtime']);
   assert.strictEqual(task.incremental.deleteRemoved, false);
   assert.strictEqual(task.incremental.concurrency, 4);
+});
+
+test('adaptConfig: direction 为 push 时 source 展开 ~，destination 保持 POSIX 路径', () => {
+  const raw = {
+    servers: [
+      {
+        host: '1.2.3.4',
+        username: 'root',
+        password: 'secret',
+        tasks: [
+          {
+            name: 'push-task',
+            direction: 'push',
+            type: 'incremental',
+            cron: '0 2 * * *',
+            source: '~/dist',
+            destination: '/var/www/html',
+          },
+        ],
+      },
+    ],
+  };
+  const config = adaptConfig(raw);
+  const task = config.servers[0].tasks[0];
+  assert.strictEqual(task.direction, 'push');
+  assert.strictEqual(task.source, path.join(os.homedir(), 'dist'));
+  assert.strictEqual(task.destination, '/var/www/html');
+});
+
+test('adaptConfig: direction 为空字符串时默认为 pull', () => {
+  const raw = {
+    servers: [
+      {
+        host: '1.2.3.4',
+        username: 'root',
+        password: 'secret',
+        tasks: [
+          {
+            name: 'default-direction-task',
+            direction: '',
+            type: 'incremental',
+            cron: '0 2 * * *',
+            source: '/a',
+          },
+        ],
+      },
+    ],
+  };
+  const config = adaptConfig(raw);
+  const task = config.servers[0].tasks[0];
+  assert.strictEqual(task.direction, 'pull');
+  assert.strictEqual(task.source, '/a');
+  assert.strictEqual(task.destination, path.join(os.homedir(), '.backup-tool', 'backups', 'default-direction-task'));
 });
 
 test('adaptConfig: 认证自动判断 - 密码', () => {

@@ -17,7 +17,7 @@
 const path = require('path');
 const fs = require('fs');
 const readline = require('readline');
-const { execSync } = require('child_process');
+const { execSync, spawn } = require('child_process');
 const { HOME_DIR, DEFAULT_CONFIG_PATH, DEFAULT_LOG_DIR, DEFAULT_BACKUP_DIR, ensureHomeDir } = require('../src/paths');
 const { resolveConfigPath, loadConfig } = require('../src/config/loader');
 const { runTransfer } = require('../src/transfer');
@@ -50,6 +50,10 @@ backup - 从远程服务器(SFTP)自动拉取文件备份工具（别名: bak）
                   - 绝对路径 / 相对路径
                   - 文件名（在 ~/.backup-tool 下查找）
                   - 不传则使用默认 ~/.backup-tool/backup.config.json5
+
+环境变量:
+  BACKUP_EXEC_TIMEOUT_MS   backup exec 总超时时间（毫秒，默认 1800000 即 30 分钟）
+  BACKUP_EXEC=1            由 exec 命令自动设置，触发主进程跳过调度立即执行
 
 服务器路径解析（backup push/pull）：
   - 绝对路径（以 / 开头）直接使用
@@ -421,16 +425,50 @@ function cmdExec(configFilePath) {
   const configPath = resolveConfigOrExit(configFilePath);
   console.log(`[backup] 使用配置文件: ${configPath}`);
   console.log('[backup] 手动执行所有启用的备份任务（跳过调度）...');
-  try {
-    execSync(`node ${JSON.stringify(SCRIPT_PATH)} ${JSON.stringify(configPath)}`, {
-      stdio: 'inherit',
-      env: { ...process.env, BACKUP_EXEC: '1' },
-    });
-    console.log('[backup] 备份执行完成');
-  } catch (err) {
-    console.error('[backup] 备份执行失败:', err.message);
+
+  // 总超时：默认 30 分钟，可通过环境变量 BACKUP_EXEC_TIMEOUT_MS 调整（毫秒）
+  const timeoutMs = parseInt(process.env.BACKUP_EXEC_TIMEOUT_MS || '1800000', 10);
+  console.log(
+    `[backup] 总超时时间: ${timeoutMs}ms（${(timeoutMs / 60000).toFixed(1)} 分钟，环境变量 BACKUP_EXEC_TIMEOUT_MS 可覆盖）`
+  );
+
+  const child = spawn('node', [SCRIPT_PATH, configPath], {
+    stdio: 'inherit',
+    env: { ...process.env, BACKUP_EXEC: '1' },
+  });
+
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    console.error(
+      `\n[backup] 超过总超时时间 (${timeoutMs}ms)，正在终止子进程 (SIGTERM)...`
+    );
+    try { child.kill('SIGTERM'); } catch (e) { /* ignore */ }
+    // 5 秒后兜底 SIGKILL
+    setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch (e) { /* ignore */ }
+    }, 5000);
+  }, timeoutMs);
+
+  child.on('exit', (code, signal) => {
+    clearTimeout(timer);
+    if (timedOut) {
+      console.error(`[backup] 备份执行被超时强制终止 (signal=${signal})`);
+      process.exit(124); // 与 `timeout` 命令约定一致
+    }
+    if (code === 0) {
+      console.log('[backup] 备份执行完成');
+    } else {
+      console.error(`[backup] 备份执行失败，退出码 ${code}`);
+      process.exit(code || 1);
+    }
+  });
+
+  child.on('error', (err) => {
+    clearTimeout(timer);
+    console.error('[backup] 启动子进程失败:', err.message);
     process.exit(1);
-  }
+  });
 }
 
 // push 命令：上传本地文件/目录到服务器（别名: up）

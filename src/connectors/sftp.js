@@ -4,6 +4,15 @@ const fs = require('fs');
 const path = require('path');
 const SftpClient = require('ssh2-sftp-client');
 const { ConnectionError } = require('../errors');
+const { getLogger } = require('../utils/logger');
+
+/** 格式化字节数为人类可读 */
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
 
 /**
  * SFTP 连接器：封装 ssh2-sftp-client
@@ -40,15 +49,21 @@ class SftpConnector {
       if (auth.passphrase) config.passphrase = auth.passphrase;
     }
 
+    const log = getLogger();
+    log.info(`[sftp] 正在连接 ${username}@${host}:${port}（超时 ${connectTimeout}ms）...`);
+
     let lastErr = null;
     for (let attempt = 1; attempt <= retry.max; attempt++) {
       try {
+        const t0 = Date.now();
         await this.client.connect(config);
         this.connected = true;
+        log.info(`[sftp] 连接成功 ${host}:${port}（耗时 ${Date.now() - t0}ms）`);
         return;
       } catch (err) {
         lastErr = err;
         if (attempt < retry.max) {
+          log.warn(`[sftp] 连接失败（${attempt}/${retry.max}）: ${err.message}，${retry.delay}ms 后重试...`);
           await sleep(retry.delay);
         }
       }
@@ -62,11 +77,15 @@ class SftpConnector {
    * @returns {Promise<Array<{name, path, size, mtime, isDirectory}>>}
    */
   async listFiles(remotePath) {
+    const log = getLogger();
+    log.info(`[sftp] 正在列出远程路径 ${remotePath}...`);
+    const t0 = Date.now();
     try {
       // 先判断是文件还是目录
       const stat = await this.client.stat(remotePath);
       if (!stat.isDirectory) {
         // 单个文件
+        log.info(`[sftp] 列出完成 ${remotePath}（单个文件，耗时 ${Date.now() - t0}ms）`);
         return [{
           name: path.basename(remotePath),
           path: remotePath,
@@ -75,8 +94,11 @@ class SftpConnector {
           isDirectory: false,
         }];
       }
-      return await this.listDirectory(remotePath);
+      const result = await this.listDirectory(remotePath);
+      log.info(`[sftp] 列出完成 ${remotePath}（共 ${result.length} 项，耗时 ${Date.now() - t0}ms）`);
+      return result;
     } catch (err) {
+      log.warn(`[sftp] 列出远程路径失败 ${remotePath}: ${err.message}`);
       throw new ConnectionError(`列出远程路径失败 ${remotePath}: ${err.message}`, err);
     }
   }
@@ -224,6 +246,12 @@ class SftpConnector {
       return { status: 'skipped', transferred: total, total };
     }
 
+    const log = getLogger();
+    const baseName = path.basename(localPath);
+    const t0 = Date.now();
+    const remoteLabel = remoteSize > 0 ? `断点续传（已传 ${formatBytes(remoteSize)}）` : '新文件上传';
+    log.info(`[sftp] 上传 ${remoteLabel}: ${baseName} (本地 ${formatBytes(total)}) -> ${remotePath}`);
+
     // 使用底层 SFTP 原语：以追加模式（SSH_FXF_APPEND）打开远程文件，
     // write 时 position 传 null，数据始终写入文件末尾，实现断点续传
     const sftp = this.client.sftp;
@@ -232,6 +260,7 @@ class SftpConnector {
     });
 
     let transferred = remoteSize;
+    let lastProgressAt = 0;
     try {
       const rs = fs.createReadStream(localPath, { start: remoteSize, highWaterMark: 64 * 1024 });
       for await (const chunk of rs) {
@@ -243,12 +272,23 @@ class SftpConnector {
         });
         transferred += chunk.length;
         if (onProgress) onProgress(transferred, total);
+
+        // 大文件每 5 秒打印一次进度日志，便于观察是否真的在传
+        const now = Date.now();
+        if (now - lastProgressAt >= 5000) {
+          lastProgressAt = now;
+          const pct = ((transferred / total) * 100).toFixed(1);
+          const speed = transferred / ((now - t0) / 1000);
+          log.info(`[sftp] ${baseName} 上传进度: ${formatBytes(transferred)}/${formatBytes(total)} (${pct}%) ${formatBytes(speed)}/s`);
+        }
       }
     } catch (err) {
       throw new ConnectionError(`上传文件失败 ${localPath}: ${err.message}`, err);
     } finally {
       await new Promise((resolve) => sftp.close(handle, () => resolve()));
     }
+    const duration = Date.now() - t0;
+    log.info(`[sftp] 上传完成 ${baseName}: ${formatBytes(transferred)}/${formatBytes(total)}（耗时 ${duration}ms）`);
     return { status: remoteSize > 0 ? 'resumed' : 'completed', transferred: total, total };
   }
 

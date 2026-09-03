@@ -7,6 +7,13 @@ const { formatTimestamp, buildBackupDirName, isBackupDir, extractTimestamp, toRe
 const { compressDir } = require('../utils/compress');
 const { LocalStorage } = require('../storage/local-storage');
 
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
 /**
  * 全量推送引擎 (Push 模式)
  * 将本地 source 目录完整推送到远程 destination/<name>_<timestamp> 目录，或压缩上传为 .zip 文件，
@@ -34,7 +41,15 @@ class FullPush {
     this.logger.info(`[full-push] ${name}: 开始全量推送 ${source} -> ${remoteDestDir}/${backupDirName}`);
 
     // 1. 获取本地文件列表
+    this.logger.info(`[full-push] ${name}: 正在扫描本地源目录 ${source}...`);
+    const tLocal = Date.now();
     const allLocalRelPaths = this.storage.listFiles(source);
+    const localTotalBytes = allLocalRelPaths.reduce((sum, rel) => {
+      try { return sum + fs.statSync(path.resolve(source, rel)).size; } catch (e) { return sum; }
+    }, 0);
+    this.logger.info(
+      `[full-push] ${name}: 本地扫描完成，共 ${allLocalRelPaths.length} 个文件（总计 ${formatBytes(localTotalBytes)}，耗时 ${Date.now() - tLocal}ms）`
+    );
     let uploadedCount = 0;
 
     if (compress) {
@@ -56,8 +71,11 @@ class FullPush {
     } else {
       // 非压缩模式：在远程创建版本目录，逐个上传文件
       const remoteTargetBase = toPosixPath(path.posix.join(remoteDestDir, backupDirName));
+      this.logger.info(`[full-push] ${name}: 创建远程目录 ${remoteTargetBase} 并开始上传...`);
       await connector.ensureRemoteDir(remoteTargetBase);
+      let i = 0;
       for (const rel of allLocalRelPaths) {
+        i++;
         const localFullPath = path.resolve(source, rel);
         const remoteTarget = toPosixPath(path.posix.join(remoteTargetBase, toPosixPath(rel)));
         // 确保远程子目录存在（处理源目录有嵌套子目录的情况）
@@ -65,6 +83,7 @@ class FullPush {
         if (remoteParentDir !== remoteTargetBase) {
           await connector.ensureRemoteDir(remoteParentDir);
         }
+        this.logger.info(`[full-push] ${name}: 上传 (${i}/${allLocalRelPaths.length}) ${rel}`);
         await connector.uploadResume(localFullPath, remoteTarget);
         uploadedCount++;
       }

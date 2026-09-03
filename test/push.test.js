@@ -26,24 +26,27 @@ test('IncrementalPush: 正确对比并上传有差异/新增的文件', async ()
   const deletedFiles = [];
 
   const stat1 = fs.statSync(file1);
+  const remoteEntries = [
+    {
+      name: 'file1.txt',
+      path: '/remote/dir/file1.txt',
+      size: stat1.size,
+      mtime: stat1.mtime.getTime(),
+      isDirectory: false,
+    },
+    {
+      name: 'old.txt',
+      path: '/remote/dir/old.txt',
+      size: 10,
+      mtime: 1000,
+      isDirectory: false,
+    },
+  ];
   const mockConnector = {
     // connector.listFiles 返回 {name, path, size, mtime, isDirectory}
-    listFiles: async () => [
-      {
-        name: 'file1.txt',
-        path: '/remote/dir/file1.txt',
-        size: stat1.size,
-        mtime: stat1.mtime.getTime(),
-        isDirectory: false,
-      },
-      {
-        name: 'old.txt',
-        path: '/remote/dir/old.txt',
-        size: 10,
-        mtime: 1000,
-        isDirectory: false,
-      },
-    ],
+    listFiles: async () => remoteEntries,
+    // 惰性按目录查询：只返回该目录的直接子项
+    listDir: async (dir) => (dir === '/remote/dir' ? remoteEntries : []),
     uploadResume: async (local, remote) => {
       uploadedFiles.push({ local, remote });
     },
@@ -75,6 +78,90 @@ test('IncrementalPush: 正确对比并上传有差异/新增的文件', async ()
   assert.strictEqual(uploadedFiles[0].remote, '/remote/dir/file2.txt');
   assert.strictEqual(deletedFiles.length, 1);
   assert.strictEqual(deletedFiles[0], '/remote/dir/old.txt');
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test('IncrementalPush: 按目录惰性查询远程，每个目录只 list 一次', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lazy-list-test-'));
+  // 本地结构: a/f1.txt, a/f2.txt, b/sub/f3.txt  —— 共 3 个文件、2 个远程目录
+  fs.mkdirSync(path.join(tmpDir, 'a'), { recursive: true });
+  fs.mkdirSync(path.join(tmpDir, 'b', 'sub'), { recursive: true });
+  fs.writeFileSync(path.join(tmpDir, 'a', 'f1.txt'), '1');
+  fs.writeFileSync(path.join(tmpDir, 'a', 'f2.txt'), '2');
+  fs.writeFileSync(path.join(tmpDir, 'b', 'sub', 'f3.txt'), '3');
+
+  const listedDirs = [];
+  const mockConnector = {
+    // 后台全量遍历：模拟一个很大的远程树，但主流程不应依赖它完成
+    listFiles: async () => {
+      await new Promise((r) => setTimeout(r, 50)); // 模拟慢速远程遍历
+      return [];
+    },
+    // 惰性单目录查询：记录被查询的目录
+    listDir: async (dir) => {
+      listedDirs.push(dir);
+      return [];
+    },
+    uploadResume: async () => {},
+    deleteFile: async () => {},
+    ensureRemoteDir: async () => {},
+    setRemoteMtime: async () => {},
+  };
+
+  const pusher = new IncrementalPush(mockLogger);
+  const result = await pusher.run(mockConnector, {
+    name: 'lazy-list',
+    source: tmpDir,
+    destination: '/remote/dir',
+    incremental: { compareBy: ['size', 'mtime'], deleteRemoved: false, include: [], exclude: [] },
+  });
+
+  // 3 个文件全为新增，都应上传
+  assert.strictEqual(result.uploadedCount, 3);
+
+  // 只查询了本地文件实际所在的 2 个目录，且每个目录只查一次
+  assert.deepStrictEqual(listedDirs.sort(), ['/remote/dir/a', '/remote/dir/b/sub']);
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+test('IncrementalPush: 后台清单就绪后不再逐目录查询', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'prefetch-test-'));
+  fs.mkdirSync(path.join(tmpDir, 'sub'), { recursive: true });
+  const f1 = path.join(tmpDir, 'sub', 'f1.txt');
+  fs.writeFileSync(f1, 'content');
+  const st = fs.statSync(f1);
+
+  const listedDirs = [];
+  const mockConnector = {
+    // 后台遍历立即可用，且已包含该文件 → 主循环应命中缓存
+    listFiles: async () => [
+      { name: 'f1.txt', path: '/remote/sub/f1.txt', size: st.size, mtime: st.mtime.getTime(), isDirectory: false },
+    ],
+    listDir: async (dir) => {
+      listedDirs.push(dir);
+      return [];
+    },
+    uploadResume: async () => {},
+    deleteFile: async () => {},
+    ensureRemoteDir: async () => {},
+    setRemoteMtime: async () => {},
+  };
+
+  const pusher = new IncrementalPush(mockLogger);
+  const result = await pusher.run(mockConnector, {
+    name: 'prefetch',
+    source: tmpDir,
+    destination: '/remote',
+    incremental: { compareBy: ['size', 'mtime'], deleteRemoved: false, include: [], exclude: [] },
+  });
+
+  // 后台清单里该文件完全一致，应跳过上传
+  assert.strictEqual(result.skippedCount, 1);
+  assert.strictEqual(result.uploadedCount, 0);
+  // 缓存已完整，不应再发起任何逐目录 list
+  assert.strictEqual(listedDirs.length, 0);
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });

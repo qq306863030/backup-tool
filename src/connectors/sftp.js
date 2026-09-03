@@ -108,10 +108,11 @@ class SftpConnector {
    * 远程大目录遍历时串行递归极慢，改为广度优先 + 并发，吞吐量提升数倍
    * @param {string} remotePath 远程目录
    * @param {object} [log] logger 实例（可选）
-   * @param {number} [concurrency=16] 同一时刻最多并发多少个 list 请求
+   * @param {number} [concurrency=8] 同一时刻最多并发多少个 list 请求。
+   *   取值偏高会与同连接上的上传/下载争抢 SSH 通道，8 在吞吐与稳定性间较平衡
    * @returns {Promise<Array<{name, path, size, mtime, isDirectory}>>}
    */
-  async listDirectory(remotePath, log, concurrency = 16) {
+  async listDirectory(remotePath, log, concurrency = 8) {
     const logger = log || getLogger();
     const result = [];
     // 待处理的子目录队列
@@ -164,6 +165,28 @@ class SftpConnector {
 
     await Promise.all(workers);
     return result;
+  }
+
+  /**
+   * 列出单个目录的直接子项（非递归）
+   * 目录不存在或不可读时返回空数组而不抛错，便于调用方按需惰性拉取
+   * @param {string} remotePath 远程目录
+   * @returns {Promise<Array<{name, path, size, mtime, isDirectory}>>}
+   */
+  async listDir(remotePath) {
+    try {
+      const items = await this.client.list(remotePath);
+      return items.map((item) => ({
+        name: item.name,
+        path: `${remotePath.replace(/\/+$/, '')}/${item.name}`,
+        size: item.size,
+        mtime: item.modifyTime,
+        isDirectory: item.type === 'd',
+      }));
+    } catch (err) {
+      // 目录不存在 / 无权限：视为空目录，不中断上层流程
+      return [];
+    }
   }
 
   /**

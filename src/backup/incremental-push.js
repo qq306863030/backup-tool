@@ -65,23 +65,81 @@ class IncrementalPush {
       `[incremental-push] ${task.name}: 本地扫描完成，共 ${targetLocalFiles.length} 个文件（总计 ${formatBytes(totalLocalBytes)}，耗时 ${Date.now() - tLocal}ms）`
     );
 
-    // 2. 获取远程文件列表 (connector.listFiles 返回 {name, path, size, mtime, isDirectory})
-    this.logger.info(`[incremental-push] ${task.name}: 正在获取远程文件清单 ${destination}（用于差异对比）...`);
-    let remoteFiles = [];
-    try {
-      const entries = await connector.listFiles(destination);
-      remoteFiles = entries.filter((e) => !e.isDirectory);
-      this.logger.info(`[incremental-push] ${task.name}: 远程清单获取完成，共 ${remoteFiles.length} 个文件`);
-    } catch (err) {
-      this.logger.warn(`[incremental-push] ${task.name}: 获取远程目录失败，将按全量新增处理: ${err.message}`);
-    }
+    // 2. 远程清单：后台并发预取 + 按需惰性补充
+    //    旧实现在此处 await 完整远程遍历（49GB 目录需数分钟）后才开始上传，
+    //    改为后台预取并逐步按目录写入缓存，主线程立即开始上传；
+    //    处理到某目录时若缓存尚未就绪，则自行 list 一次，保证永不阻塞。
+    const remoteDirCache = new Map(); // remoteDir -> Map<fileName, {size, mtime}>
+    const EMPTY_DIR_INDEX = new Map();
+    let lazyListCount = 0; // 主线程因缓存未命中而主动 list 的目录数
+    let remoteScanDone = false; // 后台遍历是否已产出完整缓存
 
-    // 构建远程文件索引 (以相对路径为 key)
-    const remoteFileMap = new Map();
-    for (const rf of remoteFiles) {
-      const rel = toPosixPath(toRelativePath(rf.path, destination));
-      remoteFileMap.set(rel, { size: rf.size, mtime: new Date(rf.mtime) });
-    }
+    // 将一条远程条目写入「目录 -> 文件名」缓存
+    const indexRemoteEntry = (entry) => {
+      if (entry.isDirectory) return;
+      const dir = path.posix.dirname(toPosixPath(entry.path));
+      const base = path.posix.basename(entry.path);
+      let map = remoteDirCache.get(dir);
+      if (!map) {
+        map = new Map();
+        remoteDirCache.set(dir, map);
+      }
+      map.set(base, { size: entry.size, mtime: new Date(entry.mtime) });
+    };
+
+    const tRemote = Date.now();
+    // 后台启动完整远程遍历（并发 BFS），结果边产出边填充缓存；此处故意不 await
+    const remoteScanPromise = connector
+      .listFiles(destination)
+      .then((entries) => {
+        const files = entries.filter((e) => !e.isDirectory);
+        for (const e of files) indexRemoteEntry(e);
+        remoteScanDone = true;
+        this.logger.info(
+          `[incremental-push] ${task.name}: 远程清单获取完成，共 ${files.length} 个文件（耗时 ${Date.now() - tRemote}ms，主线程另行补充 list ${lazyListCount} 个目录）`
+        );
+        return files;
+      })
+      .catch((err) => {
+        // 远程目录不存在：视为空清单，缓存已是完整的，主循环无需再逐目录 list
+        if (/no such file|not exist|ENOENT/i.test(err.message)) {
+          remoteScanDone = true;
+          this.logger.info(`[incremental-push] ${task.name}: 远程目录 ${destination} 不存在，按全新上传处理`);
+          return [];
+        }
+        // 其他错误（网络等）：缓存不可信，主循环继续按需惰性 list
+        this.logger.warn(`[incremental-push] ${task.name}: 后台获取远程清单失败，将按需逐目录查询: ${err.message}`);
+        return [];
+      });
+    this.logger.info(`[incremental-push] ${task.name}: 已在后台启动远程清单获取，立即开始上传...`);
+
+    // 按需获取某目录的远程文件索引：优先用后台预取结果，缺失时自行 list 一次
+    const getRemoteDirIndex = async (remoteDir) => {
+      const cached = remoteDirCache.get(remoteDir);
+      if (cached) return cached;
+      // 后台遍历已完成 → 缓存是完整的，未命中即远程不存在该目录，无需再问服务器
+      if (remoteScanDone) return EMPTY_DIR_INDEX;
+      if (typeof connector.listDir !== 'function') return EMPTY_DIR_INDEX;
+
+      const fresh = new Map();
+      for (const e of await connector.listDir(remoteDir)) {
+        if (!e.isDirectory) fresh.set(e.name, { size: e.size, mtime: new Date(e.mtime) });
+      }
+      lazyListCount++;
+      // await 期间后台可能已写入该目录，合并而非覆盖，避免丢条目
+      const existing = remoteDirCache.get(remoteDir);
+      if (existing) {
+        for (const [k, v] of fresh) existing.set(k, v);
+        return existing;
+      }
+      remoteDirCache.set(remoteDir, fresh);
+      return fresh;
+    };
+
+    // 让出一次事件循环，给后台远程遍历填充缓存的机会。
+    // 远程清单若很快就绪（小目录 / 目录不存在），主循环即可全程命中缓存、
+    // 完全省掉逐目录 list；若尚未就绪，主循环仍会按需惰性 list，不会被阻塞。
+    await new Promise((resolve) => setImmediate(resolve));
 
     let uploadedCount = 0;
     let skippedCount = 0;
@@ -90,16 +148,20 @@ class IncrementalPush {
     // 3. 遍历本地目标文件，对比并上传有变化或新增的文件
     let processed = 0;
     for (const local of targetLocalFiles) {
-      const remote = remoteFileMap.get(local.relativePath);
       const remoteTarget = toPosixPath(path.posix.join(toPosixPath(destination), local.relativePath));
+      const remoteDir = path.posix.dirname(remoteTarget);
+      const remoteName = path.posix.basename(remoteTarget);
+
+      // 只查询该文件所在目录，而非整棵远程树
+      const dirIndex = await getRemoteDirIndex(remoteDir);
+      const remote = dirIndex.get(remoteName);
 
       if (needsSync(remote, local, compareBy)) {
-        // 确保远程父目录存在
-        const remoteParentDir = toPosixPath(path.posix.dirname(remoteTarget));
+        // 确保远程父目录存在（remoteDir 即远程目标文件的父目录）
         try {
-          await connector.ensureRemoteDir(remoteParentDir);
+          await connector.ensureRemoteDir(remoteDir);
         } catch (err) {
-          this.logger.warn(`[incremental-push] ${task.name}: 创建远程目录失败 ${remoteParentDir}: ${err.message}`);
+          this.logger.warn(`[incremental-push] ${task.name}: 创建远程目录失败 ${remoteDir}: ${err.message}`);
         }
         this.logger.info(`[incremental-push] ${task.name}: 上传 (${uploadedCount + 1}) ${local.relativePath} (${formatBytes(local.size)}) -> ${remoteTarget}`);
         await connector.uploadResume(local.fullPath, remoteTarget);
@@ -115,10 +177,14 @@ class IncrementalPush {
       }
     }
 
-    // 4. 处理远程已被删除但在本地已不存在的文件 (如果开启了 deleteRemoved)
+    // 4. 等待后台远程遍历收尾（保证进程不会悬挂未完成的 promise），
+    //    据此清理本地已不存在、远程仍残留的文件
+    const remoteFiles = await remoteScanPromise;
+
     if (deleteRemoved) {
       const localRelSet = new Set(targetLocalFiles.map((f) => f.relativePath));
-      for (const [rel] of remoteFileMap.entries()) {
+      for (const rf of remoteFiles) {
+        const rel = toPosixPath(toRelativePath(rf.path, destination));
         if (!localRelSet.has(rel)) {
           const remoteTarget = toPosixPath(path.posix.join(toPosixPath(destination), rel));
           this.logger.info(`[incremental-push] ${task.name}: 删除远程多余文件 ${remoteTarget}`);

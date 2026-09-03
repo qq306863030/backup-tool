@@ -94,7 +94,7 @@ class SftpConnector {
           isDirectory: false,
         }];
       }
-      const result = await this.listDirectory(remotePath);
+      const result = await this.listDirectory(remotePath, log);
       log.info(`[sftp] 列出完成 ${remotePath}（共 ${result.length} 项，耗时 ${Date.now() - t0}ms）`);
       return result;
     } catch (err) {
@@ -104,28 +104,65 @@ class SftpConnector {
   }
 
   /**
-   * 递归列出目录下的所有文件
+   * 并发递归列出目录下的所有文件（BFS + 并发限制）
+   * 远程大目录遍历时串行递归极慢，改为广度优先 + 并发，吞吐量提升数倍
    * @param {string} remotePath 远程目录
+   * @param {object} [log] logger 实例（可选）
+   * @param {number} [concurrency=16] 同一时刻最多并发多少个 list 请求
    * @returns {Promise<Array<{name, path, size, mtime, isDirectory}>>}
    */
-  async listDirectory(remotePath) {
-    const items = await this.client.list(remotePath);
+  async listDirectory(remotePath, log, concurrency = 16) {
+    const logger = log || getLogger();
     const result = [];
-    for (const item of items) {
-      const fullPath = `${remotePath.replace(/\/+$/, '')}/${item.name}`;
-      const entry = {
-        name: item.name,
-        path: fullPath,
-        size: item.size,
-        mtime: item.modifyTime,
-        isDirectory: item.type === 'd',
-      };
-      result.push(entry);
-      if (item.type === 'd') {
-        const children = await this.listDirectory(fullPath);
-        result.push(...children);
+    // 待处理的子目录队列
+    const pendingDirs = [remotePath];
+    let listedDirs = 0;
+    let lastProgressAt = 0;
+    const t0 = Date.now();
+
+    // 限制并发的 worker 池
+    const workers = Array.from({ length: concurrency }, () => (async () => {
+      while (true) {
+        const dir = pendingDirs.shift();
+        if (!dir) break;
+        let items;
+        try {
+          items = await this.client.list(dir);
+        } catch (err) {
+          logger.warn(`[sftp] 列出子目录失败 ${dir}: ${err.message}`);
+          continue;
+        }
+        listedDirs++;
+        const dirChildren = [];
+        for (const item of items) {
+          const fullPath = `${dir.replace(/\/+$/, '')}/${item.name}`;
+          const entry = {
+            name: item.name,
+            path: fullPath,
+            size: item.size,
+            mtime: item.modifyTime,
+            isDirectory: item.type === 'd',
+          };
+          result.push(entry);
+          if (item.type === 'd') {
+            dirChildren.push(fullPath);
+          }
+        }
+        // 子目录入队（保证并发安全：push 到同一数组末尾即可）
+        for (const sub of dirChildren) pendingDirs.push(sub);
+
+        // 每 5 秒打印一次进度，避免大目录长时间静默
+        const now = Date.now();
+        if (now - lastProgressAt >= 5000) {
+          lastProgressAt = now;
+          logger.info(
+            `[sftp] 列出进度: 已展开 ${listedDirs} 个目录，发现 ${result.length} 项，剩余队列 ${pendingDirs.length}（耗时 ${((now - t0) / 1000).toFixed(1)}s）`
+          );
+        }
       }
-    }
+    })());
+
+    await Promise.all(workers);
     return result;
   }
 

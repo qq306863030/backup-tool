@@ -51,9 +51,12 @@ backup - 从远程服务器(SFTP)自动拉取文件备份工具（别名: bak）
                   - 文件名（在 ~/.backup-tool 下查找）
                   - 不传则使用默认 ~/.backup-tool/backup.config.json5
 
-环境变量:
-  BACKUP_EXEC_TIMEOUT_MS   backup exec 总超时时间（毫秒，默认 1800000 即 30 分钟）
-  BACKUP_EXEC=1            由 exec 命令自动设置，触发主进程跳过调度立即执行
+超时控制:
+  在 server 配置中用 timeout 字段设置总超时（单位: 小时）
+    "timeout": 2     // 该 server 超时 2 小时
+    "timeout": -1    // 不限制（默认值）
+  多个 server 串行执行，backup exec 的总超时为各 server.timeout 之和；
+  任一 server 为 -1 则整体不限制。
 
 服务器路径解析（backup push/pull）：
   - 绝对路径（以 / 开头）直接使用
@@ -420,35 +423,81 @@ function cmdStart(configFilePath) {
   }
 }
 
+// setTimeout 能接受的最大延时（约 24.8 天），超过该值会被立即触发
+const MAX_TIMEOUT_MS = 2147483647;
+
+/**
+ * 依据各 server 的 timeout 配置计算 backup exec 的总超时（毫秒）
+ * 各 server 串行执行，故累加；任一 server 为 -1（不限）则整体不限
+ * @param {object} raw 原始配置
+ * @returns {number} 毫秒数，0 表示不限制
+ */
+function calcTotalTimeoutMs(raw) {
+  const servers = Array.isArray(raw && raw.servers) ? raw.servers : [];
+  let totalHours = 0;
+  for (const server of servers) {
+    const t = server && server.timeout !== undefined ? server.timeout : -1;
+    if (t === -1) return 0; // 任一不限 → 整体不限
+    if (typeof t === 'number' && t > 0) totalHours += t;
+  }
+  if (totalHours <= 0) return 0;
+
+  const ms = totalHours * 3600 * 1000;
+  if (ms > MAX_TIMEOUT_MS) {
+    console.warn(`[backup] 警告: 配置的 timeout 合计 ${totalHours} 小时超出可设定上限，将按不限制处理`);
+    return 0;
+  }
+  return ms;
+}
+
+/**
+ * 格式化时长为人类可读（按量级自动切换单位）
+ * @param {number} ms 毫秒
+ * @returns {string}
+ */
+function formatDuration(ms) {
+  if (ms >= 3600000) return `${(ms / 3600000).toFixed(2)} 小时`;
+  if (ms >= 60000) return `${(ms / 60000).toFixed(1)} 分钟`;
+  return `${Math.round(ms / 1000)} 秒`;
+}
+
 // exec 命令：跳过调度，手动执行一次所有启用的备份任务
 function cmdExec(configFilePath) {
   const configPath = resolveConfigOrExit(configFilePath);
   console.log(`[backup] 使用配置文件: ${configPath}`);
   console.log('[backup] 手动执行所有启用的备份任务（跳过调度）...');
 
-  // 总超时：默认 30 分钟，可通过环境变量 BACKUP_EXEC_TIMEOUT_MS 调整（毫秒）
-  const timeoutMs = parseInt(process.env.BACKUP_EXEC_TIMEOUT_MS || '1800000', 10);
+  // 总超时来自各 server 的 timeout 配置（单位小时），未配置视为 -1（不限制）
+  let timeoutMs = 0;
+  try {
+    timeoutMs = calcTotalTimeoutMs(loadConfig(configPath));
+  } catch (err) {
+    console.warn(`[backup] 警告: 读取配置失败，无法计算总超时，将按不限制处理: ${err.message}`);
+  }
   console.log(
-    `[backup] 总超时时间: ${timeoutMs}ms（${(timeoutMs / 60000).toFixed(1)} 分钟，环境变量 BACKUP_EXEC_TIMEOUT_MS 可覆盖）`
+    timeoutMs > 0
+      ? `[backup] 总超时时间: ${formatDuration(timeoutMs)}（由各 server.timeout 累加得出）`
+      : '[backup] 总超时时间: 不限制（server.timeout 为 -1 或未配置）'
   );
 
-  const child = spawn('node', [SCRIPT_PATH, configPath], {
+  const child = spawn('node', [SCRIPT_PATH, configPath, '--exec'], {
     stdio: 'inherit',
-    env: { ...process.env, BACKUP_EXEC: '1' },
   });
 
   let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    console.error(
-      `\n[backup] 超过总超时时间 (${timeoutMs}ms)，正在终止子进程 (SIGTERM)...`
-    );
-    try { child.kill('SIGTERM'); } catch (e) { /* ignore */ }
-    // 5 秒后兜底 SIGKILL
-    setTimeout(() => {
-      try { child.kill('SIGKILL'); } catch (e) { /* ignore */ }
-    }, 5000);
-  }, timeoutMs);
+  const timer = timeoutMs > 0
+    ? setTimeout(() => {
+        timedOut = true;
+        console.error(
+          `\n[backup] 超过总超时时间 (${formatDuration(timeoutMs)})，正在终止子进程 (SIGTERM)...`
+        );
+        try { child.kill('SIGTERM'); } catch (e) { /* ignore */ }
+        // 5 秒后兜底 SIGKILL
+        setTimeout(() => {
+          try { child.kill('SIGKILL'); } catch (e) { /* ignore */ }
+        }, 5000).unref();
+      }, timeoutMs)
+    : null;
 
   child.on('exit', (code, signal) => {
     clearTimeout(timer);
@@ -676,4 +725,9 @@ function main() {
   }
 }
 
-main();
+// 直接运行时执行；被 require 时不执行（便于单元测试）
+if (require.main === module) {
+  main();
+}
+
+module.exports = { calcTotalTimeoutMs, formatDuration };

@@ -10,7 +10,6 @@ module.exports = {
       cron_restart: "0 4 * * *",
       env: {
         NODE_ENV: "production",
-        BACKUP_CONFIG: "./config/backup.config.json5",
       },
       out_file: "./logs/pm2-out.log",
       error_file: "./logs/pm2-error.log",

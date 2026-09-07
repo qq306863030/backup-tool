@@ -17,6 +17,8 @@ const DEFAULTS = {
   server: {
     port: 22,
     connectTimeout: 10000,
+    // 总超时（小时）：-1 表示不限制
+    timeout: -1,
     retry: { max: 3, delay: 5000 },
   },
   task: {
@@ -105,6 +107,8 @@ function adaptServer(server, defaultBasedir) {
     username: server.username,
     auth,
     connectTimeout: server.connectTimeout ?? DEFAULTS.server.connectTimeout,
+    // 总超时（小时）：-1 表示不限制
+    timeout: server.timeout ?? DEFAULTS.server.timeout,
     retry: {
       max: server.retry?.max ?? DEFAULTS.server.retry.max,
       delay: server.retry?.delay ?? DEFAULTS.server.retry.delay,

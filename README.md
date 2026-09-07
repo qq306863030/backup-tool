@@ -270,9 +270,10 @@ backup pull prod /etc/nginx ./downloads
       // privateKeyPath: "~/.ssh/id_rsa", // 有此项 → 私钥认证
       // passphrase: "xxx",         // 私钥口令（可选，仅私钥认证时用）
 
-      // ---- 连接与重试（可选，省略用默认值） ----
+      // ---- 连接、重试与超时（可选，省略用默认值） ----
       // connectTimeout: 10000,     // 默认 10000ms
       // retry: { max: 3, delay: 5000 }, // 默认 { max: 3, delay: 5000 }
+      // timeout: -1,               // 总超时（小时），-1 表示不限制（默认）
 
       // ---- 该服务器下的备份任务（可多个） ----
       tasks: [

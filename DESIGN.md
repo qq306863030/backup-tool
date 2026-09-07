@@ -254,7 +254,7 @@ flowchart TD
 ### 4.3 核心模块说明
 
 #### ① 配置加载、适配与校验（`config/`）
-- `loader.js`：用 `json5` 包读取配置文件，支持环境变量 `BACKUP_CONFIG` 指定路径。
+- `loader.js`：用 `json5` 包读取配置文件，路径来自命令行参数，未指定时使用默认 `~/.backup-tool/backup.config.json5`。
 - `adapter.js`：**核心新增模块**，将用户极简配置转换为内部标准配置（填充默认值、确定认证类型、归一化过滤规则）。
 - `schema.js`：用 `zod` 校验适配后的配置，检查必填字段、类型、枚举值（`type` 只能是 `incremental`/`full`），配置错误时启动即报错退出。
 
@@ -307,7 +307,6 @@ module.exports = {
       cron_restart: "0 4 * * *",    // 每天凌晨 4 点重启一次，防内存泄漏
       env: {
         NODE_ENV: "production",
-        BACKUP_CONFIG: "./config/backup.config.json5",
       },
       out_file: "./logs/pm2-out.log",
       error_file: "./logs/pm2-error.log",

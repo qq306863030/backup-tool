@@ -42,7 +42,7 @@ function resolveConfigPath(configPath) {
  * @returns {object} 原始用户配置
  */
 function loadConfig(configPath) {
-  const resolvedPath = configPath || process.env.BACKUP_CONFIG || DEFAULT_CONFIG_PATH;
+  const resolvedPath = configPath || DEFAULT_CONFIG_PATH;
   const absPath = path.resolve(resolvedPath);
 
   if (!fs.existsSync(absPath)) {

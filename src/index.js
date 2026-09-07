@@ -68,10 +68,13 @@ async function main(configPath, options = {}) {
 }
 
 // 直接运行时启动，支持传入配置文件路径
-// 设置 BACKUP_EXEC=1 时跳过调度，手动执行所有任务
+// 携带 --exec 参数时跳过调度，手动执行所有任务
 if (require.main === module) {
-  const configPath = process.argv[2];
-  const options = { exec: process.env.BACKUP_EXEC === '1' };
+  const args = process.argv.slice(2);
+  const exec = args.includes('--exec');
+  // 配置文件路径：第一个非 --exec 的参数
+  const configPath = args.find((arg) => arg !== '--exec');
+  const options = { exec };
   main(configPath, options).catch((err) => {
     const logger = getLogger();
     logger.error(`启动失败: ${err.message}`);

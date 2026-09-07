@@ -39,6 +39,14 @@ function validateServer(server) {
   if (server.auth.type === 'privateKey' && !server.auth.privateKeyPath) {
     throw new ConfigError(`服务器 ${server.host} 私钥认证缺少 privateKeyPath`);
   }
+  // timeout：单位为小时，-1 表示不限制，其余必须为大于 0 的数值
+  if (server.timeout !== -1) {
+    if (typeof server.timeout !== 'number' || Number.isNaN(server.timeout) || server.timeout <= 0) {
+      throw new ConfigError(
+        `服务器 ${server.host} 的 timeout 必须是 -1（不限制）或大于 0 的小时数，当前为 ${server.timeout}`
+      );
+    }
+  }
   if (!Array.isArray(server.tasks) || server.tasks.length === 0) {
     throw new ConfigError(`服务器 ${server.host} 缺少 tasks`);
   }

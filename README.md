@@ -274,6 +274,8 @@ backup pull prod /etc/nginx ./downloads
       // connectTimeout: 10000,     // 默认 10000ms
       // retry: { max: 3, delay: 5000 }, // 默认 { max: 3, delay: 5000 }
       // timeout: -1,               // 总超时（小时），-1 表示不限制（默认）
+      //                            // 各 server 串行执行，backup exec 的总超时
+      //                            // 为各 server.timeout 之和；任一为 -1 则整体不限
 
       // ---- 该服务器下的备份任务（可多个） ----
       tasks: [

@@ -273,9 +273,13 @@ If the config file does not exist, an error is reported and the process exits.
       // privateKeyPath: "~/.ssh/id_rsa", // If present → private key auth
       // passphrase: "xxx",         // Private key passphrase (optional)
 
-      // ---- Connection & retry (optional, defaults used if omitted) ----
+      // ---- Connection, retry & timeout (optional, defaults used if omitted) ----
       // connectTimeout: 10000,     // Default 10000ms
       // retry: { max: 3, delay: 5000 }, // Default { max: 3, delay: 5000 }
+      // timeout: -1,               // Total timeout in hours; -1 = unlimited (default)
+      //                            // Servers run sequentially, so the total timeout of
+      //                            // `backup exec` is the sum of all server timeouts.
+      //                            // If any server is -1, the whole run is unlimited.
 
       // ---- Tasks for this server (multiple allowed) ----
       tasks: [

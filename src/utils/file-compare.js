@@ -11,7 +11,7 @@
  * @param {string[]} compareBy 比较依据数组，可包含 name/size/mtime
  * @returns {boolean} true 表示需要同步
  */
-function needsSync(remote, local, compareBy = ['name', 'size', 'mtime']) {
+function needsSync(remote, local, compareBy = ['name', 'size']) {
   // 一方不存在，说明需要同步（下载或上传）
   if (!local || !remote) return true;
 
@@ -47,6 +47,8 @@ function sameMtime(a, b, toleranceMs = 1000) {
   return Math.abs(ta - tb) <= toleranceMs;
 }
 
+const { toPosixPath } = require('./path');
+
 /**
  * 根据 include/exclude 规则过滤文件列表
  * include 优先于 exclude：先按 include 过滤（只保留匹配的文件），
@@ -54,11 +56,15 @@ function sameMtime(a, b, toleranceMs = 1000) {
  * @param {string[]} filePaths 文件相对路径列表
  * @param {string[]} include 包含规则（glob）
  * @param {string[]} exclude 排除规则（glob）
- * @returns {string[]} 过滤后的文件列表
+ * @returns {string[]} 过滤后的文件列表（统一 POSIX 相对路径）
  */
 function filterFiles(filePaths, include = [], exclude = []) {
   const micromatch = require('micromatch');
-  let result = filePaths;
+  // 统一转为 POSIX 格式并去掉前导斜杠和多余斜杠，避免 Windows 反斜杠导致 glob 匹配失败或返回值不一致
+  const normalizedPaths = filePaths.map((p) =>
+    toPosixPath(p).replace(/\/+/g, '/').replace(/^\/+/, '')
+  );
+  let result = normalizedPaths;
 
   // include 优先：非空则只保留匹配的文件
   if (include && include.length > 0) {
@@ -70,7 +76,7 @@ function filterFiles(filePaths, include = [], exclude = []) {
     result = micromatch.not(result, exclude);
   }
 
-  return result;
+  return result.map((p) => toPosixPath(p).replace(/\/+/g, '/').replace(/^\/+/, ''));
 }
 
 module.exports = { needsSync, sameMtime, filterFiles };

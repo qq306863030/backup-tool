@@ -72,7 +72,7 @@
           destination: "./backups/mysql", // 本地目标路径
 
           incremental: {
-            compareBy: ["name", "size", "mtime"], // 比较依据
+            compareBy: ["name", "size"], // 比较依据
             deleteRemoved: false,   // 远程已删除的文件，本地是否同步删除
             include: ["**/*.sql"],  // 仅包含规则（优先于 exclude）
             exclude: ["*.tmp", "*.log"], // 排除规则
@@ -176,7 +176,7 @@ flowchart LR
           source: "/data",
           destination: "./b",
           incremental: {
-            compareBy: ["name", "size", "mtime"], // 默认值
+            compareBy: ["name", "size"], // 默认值
             deleteRemoved: false,        // 默认值
             include: [],
             exclude: [],
@@ -377,7 +377,7 @@ module.exports = {
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| `compareBy` | array | - | `["name","size","mtime"]` | 比较依据 |
+| `compareBy` | array | - | `["name","size"]` | 比较依据 |
 | `deleteRemoved` | boolean | - | `false` | 远程删除的文件本地是否同步删除 |
 | `include` | array | - | `[]` | 仅包含规则（**优先于 exclude**） |
 | `exclude` | array | - | `[]` | 排除规则 |

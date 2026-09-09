@@ -293,17 +293,19 @@ If the config file does not exist, an error is reported and the process exits.
           source: "/data",               // Required: remote source path
           destination: "~/.backup-tool/backups/data", // Required: local destination
 
+          // 🚀 Concurrency controls (optional)
+          checkConcurrency: 8,           // Concurrency for scanning & comparing, default 8
+          concurrency: 4,                // Concurrency for file transfer execution, default 4
+
           incremental: {
-            // Compare by: name | size | mtime, default ["name","size","mtime"]
-            compareBy: ["name", "size", "mtime"],
+            // Compare by: name | size | mtime, default ["name","size"] (mtime omitted by default)
+            compareBy: ["name", "size"],
             // Delete local files removed on remote, default false
             deleteRemoved: false,
-            // Include rules (priority over exclude), default []
-            include: ["**/*.sql"],
+            // Include rules (priority over exclude, empty matches all), default []
+            include: [],
             // Exclude rules, default []
             exclude: ["*.tmp", "*.log"],
-            // Concurrent downloads, default 4
-            concurrency: 4,
           },
         },
 

@@ -74,15 +74,17 @@ function safeJoin(base, relative) {
  * @returns {string} 相对路径
  */
 function toRelativePath(remotePath, source) {
-  const normalizedSource = source.replace(/\/+$/, '');
-  if (remotePath === normalizedSource) {
+  if (!remotePath || !source) return remotePath || '';
+  const normRemote = toPosixPath(remotePath).replace(/\/+/g, '/');
+  const normSource = toPosixPath(source).replace(/\/+/g, '/').replace(/\/+$/, '');
+  if (normRemote === normSource) {
     // source 是单个文件时，返回文件名
-    return path.basename(remotePath);
+    return path.posix.basename(normRemote);
   }
-  if (remotePath.startsWith(normalizedSource + '/')) {
-    return remotePath.slice(normalizedSource.length + 1);
+  if (normRemote.startsWith(normSource + '/')) {
+    return normRemote.slice(normSource.length + 1);
   }
-  return remotePath;
+  return normRemote;
 }
 
 /**

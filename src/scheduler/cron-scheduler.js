@@ -3,6 +3,7 @@
 const cron = require('node-cron');
 const { SftpConnector } = require('../connectors/sftp');
 const { BackupRunner } = require('../backup');
+const { formatDurationHMS } = require('../utils/concurrent-pool');
 
 /**
  * cron 调度器：注册/注销任务
@@ -55,13 +56,16 @@ class CronScheduler {
     }
     task._running = true;
     const connector = new SftpConnector(server);
+    const t0 = Date.now();
     try {
       this.logger.info(`[scheduler] 任务 ${task.name} 开始执行`);
       await connector.connect();
       const result = await this.runner.runTask(connector, task);
-      this.logger.info(`[scheduler] 任务 ${task.name} 执行完成: ${JSON.stringify(result)}`);
+      const durationHMS = formatDurationHMS(Date.now() - t0);
+      this.logger.info(`[scheduler] 任务 ${task.name} 执行完成（总耗时: ${durationHMS}）: ${JSON.stringify(result)}`);
     } catch (err) {
-      this.logger.error(`[scheduler] 任务 ${task.name} 执行失败: ${err.message}`);
+      const durationHMS = formatDurationHMS(Date.now() - t0);
+      this.logger.error(`[scheduler] 任务 ${task.name} 执行失败（耗时: ${durationHMS}）: ${err.message}`);
     } finally {
       await connector.close();
       task._running = false;

@@ -76,9 +76,48 @@ test('adaptConfig: 填充默认值', () => {
   const task = server.tasks[0];
   assert.strictEqual(task.direction, 'pull');
   assert.strictEqual(task.enabled, true);
-  assert.deepStrictEqual(task.incremental.compareBy, ['name', 'size', 'mtime']);
+  assert.strictEqual(task.checkConcurrency, 8);
+  assert.strictEqual(task.concurrency, 4);
+  assert.deepStrictEqual(task.incremental.compareBy, ['name', 'size']);
   assert.strictEqual(task.incremental.deleteRemoved, false);
-  assert.strictEqual(task.incremental.concurrency, 4);
+  assert.strictEqual(task.incremental.concurrency, undefined);
+});
+
+test('adaptConfig: 向后兼容 incremental.concurrency 与顶层 concurrency 覆盖', () => {
+  const raw = {
+    servers: [
+      {
+        host: '1.2.3.4',
+        username: 'root',
+        password: 'secret',
+        tasks: [
+          {
+            name: 't1',
+            type: 'incremental',
+            cron: '0 2 * * *',
+            source: '/a',
+            destination: './b',
+            incremental: { concurrency: 6 },
+          },
+          {
+            name: 't2',
+            type: 'incremental',
+            cron: '0 2 * * *',
+            source: '/a',
+            destination: './b',
+            checkConcurrency: 16,
+            concurrency: 8,
+            incremental: { concurrency: 2 },
+          },
+        ],
+      },
+    ],
+  };
+  const config = adaptConfig(raw);
+  assert.strictEqual(config.servers[0].tasks[0].concurrency, 6);
+  assert.strictEqual(config.servers[0].tasks[0].checkConcurrency, 8);
+  assert.strictEqual(config.servers[0].tasks[1].concurrency, 8);
+  assert.strictEqual(config.servers[0].tasks[1].checkConcurrency, 16);
 });
 
 test('adaptConfig: direction 为 push 时 source 展开 ~，destination 保持 POSIX 路径', () => {

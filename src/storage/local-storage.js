@@ -32,12 +32,21 @@ class LocalStorage {
   }
 
   /**
-   * 列出目录下的所有文件（递归）
-   * @param {string} dir
-   * @returns {string[]} 相对路径列表
+   * 列出目录或文件下的所有文件（递归）
+   * @param {string} dir 目录或文件路径
+   * @returns {string[]} 相对路径列表（POSIX 风格或相对文件名）
    */
   listFiles(dir) {
     if (!fs.existsSync(dir)) return [];
+    try {
+      const stat = fs.statSync(dir);
+      if (stat.isFile()) {
+        return [path.basename(dir)];
+      }
+    } catch (err) {
+      return [];
+    }
+
     const result = [];
     const walk = (current, rel) => {
       const entries = fs.readdirSync(current, { withFileTypes: true });

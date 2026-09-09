@@ -25,13 +25,14 @@ const DEFAULTS = {
     direction: 'pull',
     enabled: true,
     destination: DEFAULT_BACKUP_DIR,
+    checkConcurrency: 8,
+    concurrency: 4,
   },
   incremental: {
-    compareBy: ['name', 'size', 'mtime'],
+    compareBy: ['name', 'size'],
     deleteRemoved: false,
     include: [],
     exclude: [],
-    concurrency: 4,
   },
   full: {
     maxBackups: 5,
@@ -194,17 +195,16 @@ function adaptTask(task, host) {
     cron: task.cron,
     source,
     destination,
+    checkConcurrency: parseInt(task.checkConcurrency ?? DEFAULTS.task.checkConcurrency, 10),
+    concurrency: parseInt(task.concurrency ?? task.incremental?.concurrency ?? DEFAULTS.task.concurrency, 10),
   };
 
   if (task.type === 'incremental') {
-    // Push 模式默认只比较 size（远程 mtime 不可靠，因为无法保证设置成功）
-    const defaultCompareBy = direction === 'push' ? ['size'] : DEFAULTS.incremental.compareBy;
     adapted.incremental = {
-      compareBy: task.incremental?.compareBy ?? defaultCompareBy,
+      compareBy: task.incremental?.compareBy ?? DEFAULTS.incremental.compareBy,
       deleteRemoved: task.incremental?.deleteRemoved ?? DEFAULTS.incremental.deleteRemoved,
       include: normalizeArray(task.incremental?.include),
       exclude: normalizeArray(task.incremental?.exclude),
-      concurrency: task.incremental?.concurrency ?? DEFAULTS.incremental.concurrency,
     };
   } else {
     adapted.full = {

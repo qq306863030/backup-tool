@@ -289,17 +289,19 @@ backup pull prod /etc/nginx ./downloads
           source: "/data",               // 必填：远程源路径（文件或目录）
           destination: "~/.backup-tool/backups/data", // 必填：本地目标路径
 
+          // 🚀 并发控制参数（可选）
+          checkConcurrency: 8,           // 文件扫描与差异比对并发数，默认 8
+          concurrency: 4,                // 文件传输执行并发数，默认 4
+
           incremental: {
-            // 比较依据：name | size | mtime，默认 ["name","size","mtime"]
-            compareBy: ["name", "size", "mtime"],
+            // 比较依据：name | size | mtime，默认 ["name","size"]（默认不使用日期比较）
+            compareBy: ["name", "size"],
             // 远程删除的文件本地是否同步删除，默认 false
             deleteRemoved: false,
-            // 仅包含规则（优先于 exclude），默认 []
-            include: ["**/*.sql"],
+            // 仅包含规则（优先于 exclude，留空表示全部），默认 []
+            include: [],
             // 排除规则，默认 []
             exclude: ["*.tmp", "*.log"],
-            // 并发下载数，默认 4
-            concurrency: 4,
           },
         },
 

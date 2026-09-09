@@ -7,12 +7,7 @@ const { formatTimestamp, buildBackupDirName, isBackupDir, extractTimestamp, toRe
 const { compressDir } = require('../utils/compress');
 const { LocalStorage } = require('../storage/local-storage');
 
-function formatBytes(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
+const { formatBytes, formatDurationHMS, runConcurrentPool, createAggregatedProgress } = require('../utils/concurrent-pool');
 
 /**
  * 全量推送引擎 (Push 模式)
@@ -31,9 +26,10 @@ class FullPush {
    * @param {Object} task
    */
   async run(connector, task) {
-    const { name, source, destination, full } = task;
+    const { name, source, destination, checkConcurrency, concurrency, full } = task;
     const { maxBackups, timestampFormat, compress, exclude } = full;
 
+    const t0 = Date.now();
     const timestamp = formatTimestamp(new Date(), timestampFormat);
     const backupDirName = buildBackupDirName(name, timestamp);
     const remoteDestDir = toPosixPath(destination);
@@ -69,37 +65,52 @@ class FullPush {
         }
       }
     } else {
-      // 非压缩模式：在远程创建版本目录，逐个上传文件
+      // 非压缩模式：在远程创建版本目录，并发上传文件
       const remoteTargetBase = toPosixPath(path.posix.join(remoteDestDir, backupDirName));
-      this.logger.info(`[full-push] ${name}: 创建远程目录 ${remoteTargetBase} 并开始上传...`);
+      this.logger.info(`[full-push] ${name}: 创建远程目录 ${remoteTargetBase} 并开始并发上传...`);
       await connector.ensureRemoteDir(remoteTargetBase);
-      let i = 0;
-      for (const rel of allLocalRelPaths) {
-        i++;
+      const progress = createAggregatedProgress(localTotalBytes, allLocalRelPaths.length);
+
+      let failedCount = 0;
+      await runConcurrentPool(allLocalRelPaths, concurrency || 4, async (rel) => {
         const localFullPath = path.resolve(source, rel);
         const remoteTarget = toPosixPath(path.posix.join(remoteTargetBase, toPosixPath(rel)));
-        // 确保远程子目录存在（处理源目录有嵌套子目录的情况）
-        const remoteParentDir = toPosixPath(path.posix.dirname(remoteTarget));
-        if (remoteParentDir !== remoteTargetBase) {
-          await connector.ensureRemoteDir(remoteParentDir);
+        try {
+          // 确保远程子目录存在（处理源目录有嵌套子目录的情况）
+          const remoteParentDir = toPosixPath(path.posix.dirname(remoteTarget));
+          if (remoteParentDir !== remoteTargetBase) {
+            await connector.ensureRemoteDir(remoteParentDir);
+          }
+          let prevTransferred = 0;
+          await connector.uploadResume(localFullPath, remoteTarget, (transferred) => {
+            const delta = transferred - prevTransferred;
+            prevTransferred = transferred;
+            if (delta > 0) progress.addBytes(delta);
+          });
+          uploadedCount++;
+        } catch (err) {
+          failedCount++;
+          this.logger.error(`[full-push] ${name}: 上传文件失败 ${rel}: ${err.message}`);
+        } finally {
+          progress.completeOneFile(rel);
         }
-        this.logger.info(`[full-push] ${name}: 上传 (${i}/${allLocalRelPaths.length}) ${rel}`);
-        await connector.uploadResume(localFullPath, remoteTarget);
-        uploadedCount++;
-      }
+      });
+      progress.finish();
     }
 
     // 2. 执行远程保留策略清理 (Remote Retention)
-    const cleanedCount = await this._cleanRemoteRetention(connector, remoteDestDir, name, maxBackups);
+    const cleanedCount = await this._cleanRemoteRetention(connector, remoteDestDir, name, maxBackups, checkConcurrency);
 
+    const totalDuration = formatDurationHMS(Date.now() - t0);
     this.logger.info(
-      `[full-push] ${name}: 全量推送完成, 目标: ${remoteDestDir}/${backupDirName}, 上传文件数: ${uploadedCount}, 清理旧版本数: ${cleanedCount}`
+      `[full-push] ${name}: 全量推送全部完成！总耗时: ${totalDuration}, 目标: ${remoteDestDir}/${backupDirName}, 上传文件数: ${uploadedCount}, 清理旧版本数: ${cleanedCount}`
     );
 
     return {
       uploadedCount,
       cleanedCount,
       targetDir: `${remoteDestDir}/${backupDirName}`,
+      duration: totalDuration,
     };
   }
 
@@ -107,12 +118,12 @@ class FullPush {
    * 清理远程过期的历史备份版本
    * connector.listFiles 返回 {name, path, size, mtime, isDirectory}
    */
-  async _cleanRemoteRetention(connector, remoteDestDir, taskName, maxBackups) {
+  async _cleanRemoteRetention(connector, remoteDestDir, taskName, maxBackups, checkConcurrency = 8) {
     if (!maxBackups || maxBackups <= 0) return 0;
 
     let entries = [];
     try {
-      entries = await connector.listFiles(remoteDestDir);
+      entries = await connector.listFiles(remoteDestDir, checkConcurrency);
     } catch (err) {
       this.logger.warn(`[full-push] ${taskName}: 列出远程目录失败，跳过清理: ${err.message}`);
       return 0;

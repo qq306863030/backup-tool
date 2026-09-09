@@ -271,6 +271,8 @@ async function runTransfer(configPath, action, serverName, source, target) {
   logger.info(`[transfer] ${actionText}开始: ${serverName} ${source}${target ? ` -> ${target}` : ''}`);
 
   const connector = new SftpConnector(server);
+  const { formatDurationHMS } = require('./utils/concurrent-pool');
+  const t0 = Date.now();
   try {
     await connector.connect();
     const runner = new TransferRunner(logger);
@@ -285,7 +287,8 @@ async function runTransfer(configPath, action, serverName, source, target) {
       const localDir = target || process.cwd();
       await runner.download(connector, remotePath, localDir);
     }
-    logger.info('[transfer] 操作完成');
+    const durationHMS = formatDurationHMS(Date.now() - t0);
+    logger.info(`[transfer] ${actionText}操作完成，总耗时: ${durationHMS}`);
   } finally {
     await connector.close();
   }

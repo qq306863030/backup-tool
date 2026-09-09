@@ -294,6 +294,13 @@ async function cmdAddTask(configFilePath) {
       throw new Error('源路径和目标路径不能为空');
     }
     
+    console.log('\n并发性能配置:');
+    const checkConcurrencyStr = await prompt('文件比对并发数 (默认 8): ') || '8';
+    const checkConcurrency = parseInt(checkConcurrencyStr, 10);
+
+    const concurrencyStr = await prompt('传输执行并发数 (默认 4): ') || '4';
+    const concurrency = parseInt(concurrencyStr, 10);
+
     // 任务特定配置
     let taskConfig = {
       name: taskName,
@@ -303,11 +310,13 @@ async function cmdAddTask(configFilePath) {
       cron,
       source,
       destination,
+      checkConcurrency,
+      concurrency,
     };
     
     if (type === 'incremental') {
       console.log('\n增量配置:');
-      const compareByStr = await prompt('比较依据 (默认 "name,size,mtime"): ') || 'name,size,mtime';
+      const compareByStr = await prompt('比较依据 (默认 "name,size"): ') || 'name,size';
       const compareBy = compareByStr.split(',').map(s => s.trim());
       
       const deleteRemovedStr = await prompt('删除远程已删除的本地文件 (默认 false): ') || 'false';

@@ -20,9 +20,11 @@ test('needsSync: 大小不同需要下载', () => {
   assert.strictEqual(needsSync(remote, local), true);
 });
 
-test('needsSync: 修改时间不同需要下载', () => {
+test('needsSync: 修改时间不同在显式指定 mtime 时需要同步', () => {
   const local = { size: 100, mtime: new Date('2026-08-11T05:00:00') };
-  assert.strictEqual(needsSync(remote, local), true);
+  assert.strictEqual(needsSync(remote, local, ['name', 'size', 'mtime']), true);
+  // 默认情况下不比较 mtime，只比较 name 和 size
+  assert.strictEqual(needsSync(remote, local), false);
 });
 
 test('needsSync: compareBy 为空则不比较', () => {
@@ -60,3 +62,16 @@ test('filterFiles: 无规则返回全部', () => {
   const files = ['a.sql', 'b.log'];
   assert.deepStrictEqual(filterFiles(files), files);
 });
+
+test('filterFiles: Windows 反斜杠路径正确处理', () => {
+  const files = ['dir\\sub\\a.sql', 'dir\\sub\\b.log'];
+  const result = filterFiles(files, ['**/*.sql'], []);
+  assert.deepStrictEqual(result, ['dir/sub/a.sql']);
+});
+
+test('filterFiles: Windows 反斜杠路径 exclude 正确处理', () => {
+  const files = ['dir\\sub\\a.js', 'dir\\sub\\b.tmp'];
+  const result = filterFiles(files, [], ['*.tmp', '**/*.tmp']);
+  assert.deepStrictEqual(result, ['dir/sub/a.js']);
+});
+

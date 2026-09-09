@@ -66,6 +66,12 @@ function validateTask(task, host) {
   if (!task.cron) throw new ConfigError(`任务 ${task.name} 缺少 cron`);
   if (!task.source) throw new ConfigError(`任务 ${task.name} 缺少 source`);
   if (!task.destination) throw new ConfigError(`任务 ${task.name} 缺少 destination`);
+  if (typeof task.checkConcurrency !== 'number' || Number.isNaN(task.checkConcurrency) || task.checkConcurrency < 1) {
+    throw new ConfigError(`任务 ${task.name} 的 checkConcurrency 必须是 >= 1 的正整数`);
+  }
+  if (typeof task.concurrency !== 'number' || Number.isNaN(task.concurrency) || task.concurrency < 1) {
+    throw new ConfigError(`任务 ${task.name} 的 concurrency 必须是 >= 1 的正整数`);
+  }
 }
 
 module.exports = { validateConfig };

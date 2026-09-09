@@ -145,3 +145,51 @@ test('SftpConnector.listDirectory: 并发下大量子目录不重不漏', async 
   const paths = new Set(result.map((r) => r.path));
   assert.strictEqual(paths.size, 300);
 });
+
+test('SftpConnector.listFiles: 优先走 SSH find 极速流式扫描', async () => {
+  const { Readable } = require('stream');
+  const stdoutStream = new Readable({
+    read() {
+      this.push('/remote/dir/a.txt\t1024\t1700000000.123\tf\n');
+      this.push('/remote/dir/sub\t4096\t1700000001.000\td\n');
+      this.push(null);
+    },
+  });
+  stdoutStream.stderr = new Readable({
+    read() {
+      this.push(null);
+    },
+  });
+
+  let execCalled = false;
+  const client = {
+    client: {
+      exec: (cmd, cb) => {
+        execCalled = true;
+        assert.ok(cmd.startsWith("find '/remote/dir'"));
+        setTimeout(() => cb(null, stdoutStream), 5);
+      },
+    },
+    stat: async () => ({ isDirectory: true }),
+  };
+
+  const connector = new SftpConnector({
+    host: 'x',
+    port: 22,
+    username: 'u',
+    connectTimeout: 1000,
+    retry: { max: 1, delay: 0 },
+  });
+  connector.client = client;
+  connector.connected = true;
+
+  const result = await connector.listFiles('/remote/dir');
+  assert.strictEqual(execCalled, true);
+  assert.strictEqual(result.length, 2);
+  assert.strictEqual(result[0].name, 'a.txt');
+  assert.strictEqual(result[0].size, 1024);
+  assert.strictEqual(result[0].mtime, 1700000000123);
+  assert.strictEqual(result[0].isDirectory, false);
+  assert.strictEqual(result[1].name, 'sub');
+  assert.strictEqual(result[1].isDirectory, true);
+});

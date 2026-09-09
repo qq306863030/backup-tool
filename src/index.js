@@ -33,6 +33,8 @@ async function main(configPath, options = {}) {
 
   // 手动执行模式：跳过时间调度，立即执行所有启用的任务
   if (options.exec) {
+    const { formatDurationHMS } = require('./utils/concurrent-pool');
+    const tExec0 = Date.now();
     logger.info('手动执行模式启动（跳过调度）');
     const scheduler = new CronScheduler(config, logger);
     let count = 0;
@@ -46,7 +48,8 @@ async function main(configPath, options = {}) {
         count++;
       }
     }
-    logger.info(`手动执行完成，共执行 ${count} 个任务`);
+    const durationHMS = formatDurationHMS(Date.now() - tExec0);
+    logger.info(`手动执行完成，共执行 ${count} 个任务，总耗时: ${durationHMS}`);
     return;
   }
 

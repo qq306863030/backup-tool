@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const SftpClient = require('ssh2-sftp-client');
+const readline = require('readline');
 const { ConnectionError } = require('../errors');
 const { getLogger } = require('../utils/logger');
 
@@ -40,6 +41,8 @@ class SftpConnector {
       username,
       connectTimeout,
       readyTimeout: connectTimeout,
+      keepaliveInterval: 10000, // 每 10 秒发送一次 SSH 保活心跳包，防止 NAT/防火墙切断空闲或长连接
+      keepaliveCountMax: 3,     // 连续 3 次未收到保活响应才视为超时断开
     };
 
     if (auth.type === 'password') {
@@ -72,16 +75,141 @@ class SftpConnector {
   }
 
   /**
-   * 列出路径下的文件（支持文件或目录，目录递归）
-   * @param {string} remotePath 远程路径（文件或目录）
+   * 通过 SSH Exec 执行 find 命令流式获取远程所有文件元数据（单次 RTT，毫秒级扫描数十万文件）
+   * @param {string} remotePath 远程路径
+   * @param {object} log logger 实例
    * @returns {Promise<Array<{name, path, size, mtime, isDirectory}>>}
    */
-  async listFiles(remotePath) {
+  async listFilesByFind(remotePath, log) {
+    const sshClient = this.client && this.client.client;
+    if (!sshClient || typeof sshClient.exec !== 'function') {
+      throw new Error('底层 SSH Exec 客户端不可用');
+    }
+
+    const normalizedRemote = remotePath.replace(/\/+$/, '');
+    const escapedPath = normalizedRemote.replace(/'/g, "'\\''");
+    // Linux find 命令输出: <完整路径>\t<大小字节>\t<mtime小数秒>\t<类型>\n
+    const cmd = `find '${escapedPath}' -printf '%p\\t%s\\t%T@\\t%y\\n'`;
+
+    return new Promise((resolve, reject) => {
+      let isSettled = false;
+      let idleTimer = null;
+
+      // 动态数据静默超时：连续 30 秒未收到任何一行数据才视为挂死
+      const resetIdleTimer = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          if (!isSettled) {
+            isSettled = true;
+            reject(new Error('SSH find 数据接收静默超时（连续 30 秒无新数据）'));
+          }
+        }, 30000);
+      };
+
+      resetIdleTimer();
+
+      sshClient.exec(cmd, (err, stream) => {
+        if (err) {
+          if (idleTimer) clearTimeout(idleTimer);
+          isSettled = true;
+          return reject(err);
+        }
+
+        const result = [];
+        let stderr = '';
+        let lastProgressAt = Date.now();
+        const t0 = Date.now();
+        const rl = readline.createInterface({ input: stream });
+
+        rl.on('line', (line) => {
+          if (isSettled) return;
+          resetIdleTimer(); // 只要有数据持续流入，重置静默超时
+
+          if (!line) return;
+          const parts = line.split('\t');
+          if (parts.length >= 4) {
+            const fullPath = parts[0];
+            // 排除与查询路径自身完全一致的根目录条目
+            if (fullPath === normalizedRemote && parts[3] === 'd') {
+              return;
+            }
+            const size = parseInt(parts[1], 10) || 0;
+            const mtimeSeconds = parseFloat(parts[2]);
+            const mtimeMs = Number.isNaN(mtimeSeconds) ? 0 : Math.floor(mtimeSeconds * 1000);
+            const isDirectory = parts[3] === 'd';
+            result.push({
+              name: path.posix.basename(fullPath),
+              path: fullPath,
+              size,
+              mtime: isDirectory ? 0 : mtimeMs,
+              isDirectory,
+            });
+
+            // 每 3 秒或每 10000 条输出一次进度日志
+            const now = Date.now();
+            if (now - lastProgressAt >= 3000 || result.length % 10000 === 0) {
+              lastProgressAt = now;
+              log.info(
+                `[sftp] 远程 find 接收中: 已发现 ${result.length} 项（耗时 ${((now - t0) / 1000).toFixed(1)}s）`
+              );
+            }
+          }
+        });
+
+        stream.stderr.on('data', (data) => {
+          stderr += data.toString('utf8');
+        });
+
+        const finish = (code) => {
+          if (isSettled) return;
+          isSettled = true;
+          if (idleTimer) clearTimeout(idleTimer);
+          rl.close();
+
+          if (code !== 0 && result.length === 0) {
+            return reject(new Error(stderr.trim() || `find 命令退出异常 (code ${code})`));
+          }
+          resolve(result);
+        };
+
+        stream.on('close', finish);
+        stream.on('end', () => finish(0));
+        stream.on('error', (e) => {
+          if (!isSettled) {
+            isSettled = true;
+            if (idleTimer) clearTimeout(idleTimer);
+            rl.close();
+            reject(e);
+          }
+        });
+      });
+    });
+  }
+
+  /**
+   * 列出路径下的文件（支持文件或目录，目录递归）
+   * 优先使用 SSH 远程 find 极速流式扫描，若环境不支持则自动降级为 SFTP BFS 遍历
+   * @param {string} remotePath 远程路径（文件或目录）
+   * @param {number} [concurrency=8] 目录并发扫描数（回退模式下使用）
+   * @returns {Promise<Array<{name, path, size, mtime, isDirectory}>>}
+   */
+  async listFiles(remotePath, concurrency = 8) {
     const log = getLogger();
     log.info(`[sftp] 正在列出远程路径 ${remotePath}...`);
     const t0 = Date.now();
     try {
-      // 先判断是文件还是目录
+      // 1. 优先尝试 SSH find 极速流式扫描（单次网络往返，毫秒级扫描十万+文件）
+      try {
+        const findResult = await this.listFilesByFind(remotePath, log);
+        log.info(
+          `[sftp] 远程 find 扫描全部完成 ${remotePath}（共 ${findResult.length} 项，耗时 ${Date.now() - t0}ms）`
+        );
+        return findResult;
+      } catch (findErr) {
+        log.warn(`[sftp] SSH find 极速通道未完成 (${findErr.message})，回退到 SFTP 并发遍历...`);
+      }
+
+      // 2. 回退模式：SFTP BFS 遍历
       const stat = await this.client.stat(remotePath);
       if (!stat.isDirectory) {
         // 单个文件
@@ -94,7 +222,7 @@ class SftpConnector {
           isDirectory: false,
         }];
       }
-      const result = await this.listDirectory(remotePath, log);
+      const result = await this.listDirectory(remotePath, log, concurrency);
       log.info(`[sftp] 列出完成 ${remotePath}（共 ${result.length} 项，耗时 ${Date.now() - t0}ms）`);
       return result;
     } catch (err) {
@@ -315,9 +443,22 @@ class SftpConnector {
     // 使用底层 SFTP 原语：以追加模式（SSH_FXF_APPEND）打开远程文件，
     // write 时 position 传 null，数据始终写入文件末尾，实现断点续传
     const sftp = this.client.sftp;
-    const handle = await new Promise((resolve, reject) => {
-      sftp.open(remotePath, 'a', (err, h) => (err ? reject(err) : resolve(h)));
-    });
+    let handle;
+    try {
+      handle = await new Promise((resolve, reject) => {
+        sftp.open(remotePath, 'a', (err, h) => (err ? reject(err) : resolve(h)));
+      });
+    } catch (openErr) {
+      // 若出现 No such file，通常是远程父目录在并发时未完成创建，进行一次重试
+      if (/no such file|ENOENT/i.test(openErr.message)) {
+        await this.ensureRemoteDir(path.posix.dirname(remotePath));
+        handle = await new Promise((resolve, reject) => {
+          sftp.open(remotePath, 'a', (err, h) => (err ? reject(err) : resolve(h)));
+        });
+      } else {
+        throw openErr;
+      }
+    }
 
     let transferred = remoteSize;
     let lastProgressAt = 0;
@@ -392,16 +533,42 @@ class SftpConnector {
   }
 
   /**
-   * 确保远程目录存在（递归创建，已存在时忽略）
+   * 确保远程目录存在（递归创建，带并发互斥与路径缓存）
    * @param {string} remotePath 远程目录路径
    * @returns {Promise<void>}
    */
   async ensureRemoteDir(remotePath) {
-    try {
-      await this.client.mkdir(remotePath, true);
-    } catch (err) {
-      // 目录已存在时部分实现会报错，忽略即可
+    if (!remotePath || remotePath === '/' || remotePath === '.') return;
+    const normalized = remotePath.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (!normalized) return;
+
+    if (!this._ensuredRemoteDirs) {
+      this._ensuredRemoteDirs = new Set();
     }
+    if (this._ensuredRemoteDirs.has(normalized)) {
+      return;
+    }
+
+    if (!this._mkdirLock) {
+      this._mkdirLock = Promise.resolve();
+    }
+
+    await (this._mkdirLock = this._mkdirLock.then(async () => {
+      if (this._ensuredRemoteDirs.has(normalized)) return;
+      try {
+        await this.client.mkdir(normalized, true);
+        this._ensuredRemoteDirs.add(normalized);
+      } catch (err) {
+        // 尝试检查目录是否已由并发 worker 创建
+        try {
+          const stat = await this.client.stat(normalized);
+          if (stat.isDirectory) {
+            this._ensuredRemoteDirs.add(normalized);
+            return;
+          }
+        } catch (_) {}
+      }
+    }));
   }
 
   /**

@@ -3,7 +3,7 @@
 const path = require('path');
 const os = require('os');
 const { ConfigError } = require('../errors');
-const { DEFAULT_LOG_DIR, DEFAULT_BACKUP_DIR } = require('../paths');
+const { DEFAULT_LOG_DIR, DEFAULT_BACKUP_DIR, HOME_DIR } = require('../paths');
 
 /**
  * 配置适配器：将用户极简配置转换为内部标准配置
@@ -69,9 +69,14 @@ function adaptConfig(raw) {
     throw new ConfigError('配置必须是对象');
   }
 
-  const log = { ...DEFAULTS.log, ...(raw.log || {}) };
-  // 展开日志目录中的 ~
-  log.dir = expandHome(log.dir);
+  const rawLog = raw.log && typeof raw.log === 'object' ? raw.log : {};
+  const log = { ...DEFAULTS.log, ...rawLog };
+  // 展开日志目录中的 ~ 并确保相对路径（如 ./logs）解析到 HOME_DIR (~/.backup-tool) 而不是执行所在目录
+  let logDir = log.dir ? expandHome(log.dir) : DEFAULT_LOG_DIR;
+  if (!path.isAbsolute(logDir)) {
+    logDir = path.resolve(HOME_DIR, logDir);
+  }
+  log.dir = logDir;
 
   if (!Array.isArray(raw.servers) || raw.servers.length === 0) {
     throw new ConfigError('配置缺少 servers 数组');

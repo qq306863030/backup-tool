@@ -18,7 +18,7 @@ const path = require('path');
 const fs = require('fs');
 const readline = require('readline');
 const { execSync, spawn } = require('child_process');
-const { HOME_DIR, DEFAULT_CONFIG_PATH, DEFAULT_LOG_DIR, DEFAULT_BACKUP_DIR, ensureHomeDir } = require('../src/paths');
+const { HOME_DIR, DEFAULT_CONFIG_PATH, DEFAULT_LOG_DIR, DEFAULT_BACKUP_DIR, ensureHomeDir, ensureDir } = require('../src/paths');
 const { resolveConfigPath, loadConfig } = require('../src/config/loader');
 const { runTransfer } = require('../src/transfer');
 
@@ -417,11 +417,14 @@ function cmdStart(configFilePath) {
   }
 
   ensureHomeDir();
+  ensureDir(DEFAULT_LOG_DIR);
   const configPath = resolveConfigOrExit(configFilePath);
   console.log(`[backup] 使用配置文件: ${configPath}`);
 
-  // 通过 PM2 启动
-  const cmd = `pm2 start ${JSON.stringify(SCRIPT_PATH)} --name ${APP_NAME} -- ${JSON.stringify(configPath)}`;
+  // 通过 PM2 启动，指定标准输出与错误日志输出到 ~/.backup-tool/logs
+  const pm2Out = path.join(DEFAULT_LOG_DIR, 'pm2-out.log');
+  const pm2Err = path.join(DEFAULT_LOG_DIR, 'pm2-error.log');
+  const cmd = `pm2 start ${JSON.stringify(SCRIPT_PATH)} --name ${APP_NAME} --output ${JSON.stringify(pm2Out)} --error ${JSON.stringify(pm2Err)} -- ${JSON.stringify(configPath)}`;
   try {
     execSync(cmd, { stdio: 'inherit' });
     console.log(`[backup] 服务已启动 (${APP_NAME})`);

@@ -1,9 +1,10 @@
 'use strict';
 
+const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const winston = require('winston');
-const { DEFAULT_LOG_DIR } = require('../paths');
+const { DEFAULT_LOG_DIR, HOME_DIR } = require('../paths');
 
 let logger = null;
 
@@ -13,12 +14,25 @@ let logger = null;
  * @returns {object} winston logger
  */
 function initLogger(options = {}) {
-  const {
+  let {
     level = 'info',
     dir = DEFAULT_LOG_DIR,
     maxFiles = 30,
     maxSize = '10m',
   } = options;
+
+  if (!dir) {
+    dir = DEFAULT_LOG_DIR;
+  } else if (typeof dir === 'string') {
+    if (dir === '~') {
+      dir = os.homedir();
+    } else if (dir.startsWith('~/') || dir.startsWith('~\\')) {
+      dir = path.join(os.homedir(), dir.slice(2));
+    }
+    if (!path.isAbsolute(dir)) {
+      dir = path.resolve(HOME_DIR, dir);
+    }
+  }
 
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });

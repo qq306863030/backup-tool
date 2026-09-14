@@ -35,6 +35,8 @@ test('adaptConfig: destination 中的 ~ 被展开', () => {
   assert.strictEqual(config.servers[0].tasks[0].destination, path.join(os.homedir(), 'backups', 't1'));
 });
 
+const { HOME_DIR, DEFAULT_LOG_DIR } = require('../src/paths');
+
 test('adaptConfig: log.dir 中的 ~ 被展开', () => {
   const raw = {
     log: { dir: '~/mylogs' },
@@ -51,6 +53,42 @@ test('adaptConfig: log.dir 中的 ~ 被展开', () => {
   };
   const config = adaptConfig(raw);
   assert.strictEqual(config.log.dir, path.join(os.homedir(), 'mylogs'));
+});
+
+test('adaptConfig: log.dir 为相对路径 (如 ./logs) 时解析为 ~/.backup-tool/logs', () => {
+  const raw = {
+    log: { dir: './logs' },
+    servers: [
+      {
+        host: '1.2.3.4',
+        username: 'root',
+        password: 'secret',
+        tasks: [
+          { name: 't1', type: 'incremental', cron: '0 2 * * *', source: '/a', destination: './b' },
+        ],
+      },
+    ],
+  };
+  const config = adaptConfig(raw);
+  assert.strictEqual(config.log.dir, path.join(HOME_DIR, 'logs'));
+  assert.strictEqual(config.log.dir, DEFAULT_LOG_DIR);
+});
+
+test('adaptConfig: log.dir 未设置时默认为 DEFAULT_LOG_DIR (~/.backup-tool/logs)', () => {
+  const raw = {
+    servers: [
+      {
+        host: '1.2.3.4',
+        username: 'root',
+        password: 'secret',
+        tasks: [
+          { name: 't1', type: 'incremental', cron: '0 2 * * *', source: '/a', destination: './b' },
+        ],
+      },
+    ],
+  };
+  const config = adaptConfig(raw);
+  assert.strictEqual(config.log.dir, DEFAULT_LOG_DIR);
 });
 
 test('adaptConfig: 填充默认值', () => {

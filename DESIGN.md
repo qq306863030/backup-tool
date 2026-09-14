@@ -38,7 +38,7 @@
   // ============ 全局配置 ============
   log: {
     level: "info",            // debug | info | warn | error
-    dir: "./logs",            // 日志目录
+    dir: "~/.backup-tool/logs", // 日志目录，默认 ~/.backup-tool/logs
     maxFiles: 30,             // 日志文件保留数量
     maxSize: "10m",           // 单个日志文件大小
   },
@@ -158,7 +158,7 @@ flowchart LR
 **内部标准配置（输出）**：
 ```js
 {
-  log: { level: "info", dir: "./logs", maxFiles: 30, maxSize: "10m" },
+  log: { level: "info", dir: "~/.backup-tool/logs", maxFiles: 30, maxSize: "10m" },
   servers: [
     {
       host: "192.168.1.100",
@@ -308,8 +308,8 @@ module.exports = {
       env: {
         NODE_ENV: "production",
       },
-      out_file: "./logs/pm2-out.log",
-      error_file: "./logs/pm2-error.log",
+      out_file: path.join(require('os').homedir(), '.backup-tool', 'logs', 'pm2-out.log'),
+      error_file: path.join(require('os').homedir(), '.backup-tool', 'logs', 'pm2-error.log'),
       merge_logs: true,
       time: true,
     },
@@ -341,7 +341,7 @@ module.exports = {
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `level` | string | `"info"` | 日志级别：`debug`/`info`/`warn`/`error` |
-| `dir` | string | `"./logs"` | 日志目录 |
+| `dir` | string | `"~/.backup-tool/logs"` | 日志目录 |
 | `maxFiles` | number | `30` | 日志文件保留数量 |
 | `maxSize` | string | `"10m"` | 单个日志文件大小 |
 

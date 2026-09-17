@@ -25,11 +25,26 @@ class SftpConnector {
    */
   constructor(server) {
     this.server = server;
-    this.client = new SftpClient();
+    this.client = this._createSftpClient();
     this.connected = false;
     this._reconnectPromise = null;
     this._ensuredRemoteDirs = new Set();
     this._mkdirLock = null;
+  }
+
+  /**
+   * 创建带有统一事件日志的 SftpClient 实例
+   * @private
+   */
+  _createSftpClient() {
+    return new SftpClient('sftp', {
+      error: (err) => {
+        const log = getLogger();
+        log.warn(`[sftp] 底层 SSH/SFTP 事件: ${err.message}`);
+      },
+      end: () => {},
+      close: () => {},
+    });
   }
 
   /**
@@ -40,7 +55,7 @@ class SftpConnector {
   isConnectionError(err) {
     if (!err) return false;
     const msg = `${err.message || ''} ${err.code || ''} ${err.name || ''} ${err.description || ''}`;
-    return /ECONNRESET|ECONNABORTED|ETIMEDOUT|EPIPE|ENOTCONN|closed|Not connected|No SFTP connection|client is not connected|Channel closed|Socket closed|Handshake failed/i.test(msg);
+    return /keepalive|ECONNRESET|ECONNABORTED|ETIMEDOUT|EPIPE|ENOTCONN|closed|Not connected|No SFTP connection|client is not connected|Channel closed|Socket closed|Handshake failed/i.test(msg);
   }
 
   /**
@@ -57,7 +72,7 @@ class SftpConnector {
       try {
         await this.close();
       } catch (_) {}
-      this.client = new SftpClient();
+      this.client = this._createSftpClient();
       this.connected = false;
       this._ensuredRemoteDirs = new Set();
       this._mkdirLock = null;
@@ -91,8 +106,8 @@ class SftpConnector {
       username,
       connectTimeout,
       readyTimeout: connectTimeout,
-      keepaliveInterval: 5000,  // 每 5 秒发送一次 SSH 保活心跳，防止 NAT/防火墙切断长连接
-      keepaliveCountMax: 6,     // 连续 6 次未收到保活响应才视为超时断开
+      keepaliveInterval: 15000, // 每 15 秒发送一次 SSH 保活心跳（降低心跳频率，避免大文件上传时占满队列）
+      keepaliveCountMax: 10,    // 连续 10 次未收到响应才视为超时断开（给予 150 秒高拥塞与大文件写盘缓冲）
     };
 
     if (auth.type === 'password') {
@@ -554,8 +569,10 @@ class SftpConnector {
           }
         }
       } finally {
-        if (handle) {
-          await new Promise((resolve) => sftp.close(handle, () => resolve()));
+        if (handle && this.client && this.client.sftp) {
+          try {
+            await new Promise((resolve) => sftp.close(handle, () => resolve()));
+          } catch (_) {}
         }
       }
       const duration = Date.now() - t0;

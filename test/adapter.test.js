@@ -257,3 +257,24 @@ test('adaptConfig: 缺少认证报错', () => {
   };
   assert.throws(() => adaptConfig(raw));
 });
+
+test('adaptConfig: task.largeFileThreshold 默认 10MB 并支持自定义', () => {
+  const raw = {
+    servers: [
+      {
+        host: '1.2.3.4',
+        username: 'root',
+        password: 'pwd',
+        tasks: [
+          { name: 't1', type: 'incremental', cron: '0 2 * * *', source: '/a', destination: './b' },
+          { name: 't2', type: 'full', cron: '0 3 * * *', source: '/a', destination: './b', largeFileThreshold: '50MB' },
+          { name: 't3', type: 'full', cron: '0 4 * * *', source: '/a', destination: './b', largeFileThreshold: 20971520 },
+        ],
+      },
+    ],
+  };
+  const config = adaptConfig(raw);
+  assert.strictEqual(config.servers[0].tasks[0].largeFileThreshold, 10 * 1024 * 1024);
+  assert.strictEqual(config.servers[0].tasks[1].largeFileThreshold, 50 * 1024 * 1024);
+  assert.strictEqual(config.servers[0].tasks[2].largeFileThreshold, 20971520);
+});

@@ -4,7 +4,7 @@ const path = require('path');
 const { LocalStorage } = require('../storage/local-storage');
 const { needsSync, filterFiles } = require('../utils/file-compare');
 const { toRelativePath, safeJoin } = require('../utils/path');
-const { formatBytes, formatDurationHMS, runConcurrentPool, createAggregatedProgress } = require('../utils/concurrent-pool');
+const { formatBytes, formatDurationHMS, runConcurrentPool, runAdaptivePool, createAggregatedProgress } = require('../utils/concurrent-pool');
 
 /**
  * 增量备份引擎：镜像同步，只下载有差异的文件
@@ -70,7 +70,12 @@ class IncrementalBackup {
     let downloaded = 0;
     const progress = createAggregatedProgress(totalDownloadBytes, toDownload.length);
 
-    await runConcurrentPool(toDownload, concurrency || 4, async (job) => {
+    await runAdaptivePool(toDownload, {
+      concurrency: concurrency || 4,
+      largeThreshold: task.largeFileThreshold,
+      getSize: (job) => job.entry?.size || 0,
+      logger: this.logger,
+    }, async (job) => {
       try {
         this.storage.ensureDir(path.dirname(job.localPath));
         let prevTransferred = 0;

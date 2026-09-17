@@ -193,3 +193,15 @@ test('SftpConnector.listFiles: 优先走 SSH find 极速流式扫描', async () 
   assert.strictEqual(result[1].name, 'sub');
   assert.strictEqual(result[1].isDirectory, true);
 });
+
+test('SftpConnector.isConnectionError: 正确识别 Keepalive timeout 及常规断网异常', () => {
+  const connector = new SftpConnector({ host: 'x', port: 22, username: 'u', connectTimeout: 1000, retry: { max: 1, delay: 0 } });
+
+  assert.strictEqual(connector.isConnectionError(new Error('Keepalive timeout')), true);
+  assert.strictEqual(connector.isConnectionError(new Error('ECONNRESET')), true);
+  assert.strictEqual(connector.isConnectionError(new Error('ETIMEDOUT')), true);
+  assert.strictEqual(connector.isConnectionError(new Error('Channel closed')), true);
+  assert.strictEqual(connector.isConnectionError(new Error('Socket closed')), true);
+  assert.strictEqual(connector.isConnectionError(new Error('No such file or directory')), false);
+  assert.strictEqual(connector.isConnectionError(new Error('Permission denied')), false);
+});

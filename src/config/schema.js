@@ -72,6 +72,11 @@ function validateTask(task, host) {
   if (typeof task.concurrency !== 'number' || Number.isNaN(task.concurrency) || task.concurrency < 1) {
     throw new ConfigError(`任务 ${task.name} 的 concurrency 必须是 >= 1 的正整数`);
   }
+  if (task.largeFileThreshold !== undefined) {
+    if (typeof task.largeFileThreshold !== 'number' || Number.isNaN(task.largeFileThreshold) || task.largeFileThreshold < 0) {
+      throw new ConfigError(`任务 ${task.name} 的 largeFileThreshold 必须是 >= 0 的数字`);
+    }
+  }
 }
 
 module.exports = { validateConfig };

@@ -5,7 +5,7 @@ const fs = require('fs');
 const { needsSync, filterFiles } = require('../utils/file-compare');
 const { toRelativePath, toPosixPath } = require('../utils/path');
 const { LocalStorage } = require('../storage/local-storage');
-const { formatBytes, formatDurationHMS, runConcurrentPool, createAggregatedProgress } = require('../utils/concurrent-pool');
+const { formatBytes, formatDurationHMS, runConcurrentPool, runAdaptivePool, createAggregatedProgress } = require('../utils/concurrent-pool');
 
 /**
  * 增量推送引擎 (Push 模式)
@@ -106,7 +106,12 @@ class IncrementalPush {
     let failedCount = 0;
     const progress = createAggregatedProgress(totalUploadBytes, toUpload.length);
 
-    await runConcurrentPool(toUpload, concurrency || 4, async (local) => {
+    await runAdaptivePool(toUpload, {
+      concurrency: concurrency || 4,
+      largeThreshold: task.largeFileThreshold,
+      getSize: (local) => local.size,
+      logger: this.logger,
+    }, async (local) => {
       const remoteTarget = toPosixPath(path.posix.join(toPosixPath(destination), local.relativePath));
       const remoteDir = path.posix.dirname(remoteTarget);
 
@@ -160,6 +165,9 @@ class IncrementalPush {
     this.logger.info(
       `[incremental-push] ${name}: 增量推送全部完成！总耗时: ${totalDuration}, 上传: ${uploadedCount}, 跳过: ${skippedCount}, 失败: ${failedCount}, 删除: ${deletedCount}`
     );
+    if (failedCount > 0) {
+      throw new Error(`[incremental-push] ${name}: 存在 ${failedCount} 个文件上传失败，增量推送未完全成功`);
+    }
     return { uploadedCount, skippedCount, deletedCount, failedCount, duration: totalDuration };
   }
 }

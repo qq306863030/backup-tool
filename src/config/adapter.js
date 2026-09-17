@@ -4,6 +4,7 @@ const path = require('path');
 const os = require('os');
 const { ConfigError } = require('../errors');
 const { DEFAULT_LOG_DIR, DEFAULT_BACKUP_DIR, HOME_DIR } = require('../paths');
+const { parseSize, DEFAULT_LARGE_FILE_THRESHOLD } = require('../utils/concurrent-pool');
 
 /**
  * 配置适配器：将用户极简配置转换为内部标准配置
@@ -27,6 +28,7 @@ const DEFAULTS = {
     destination: DEFAULT_BACKUP_DIR,
     checkConcurrency: 8,
     concurrency: 4,
+    largeFileThreshold: DEFAULT_LARGE_FILE_THRESHOLD,
   },
   incremental: {
     compareBy: ['name', 'size'],
@@ -202,6 +204,7 @@ function adaptTask(task, host) {
     destination,
     checkConcurrency: parseInt(task.checkConcurrency ?? DEFAULTS.task.checkConcurrency, 10),
     concurrency: parseInt(task.concurrency ?? task.incremental?.concurrency ?? DEFAULTS.task.concurrency, 10),
+    largeFileThreshold: parseSize(task.largeFileThreshold ?? DEFAULTS.task.largeFileThreshold),
   };
 
   if (task.type === 'incremental') {

@@ -7,7 +7,7 @@ const { formatTimestamp, buildBackupDirName, isBackupDir, extractTimestamp, toRe
 const { compressDir } = require('../utils/compress');
 const { LocalStorage } = require('../storage/local-storage');
 
-const { formatBytes, formatDurationHMS, runConcurrentPool, createAggregatedProgress } = require('../utils/concurrent-pool');
+const { formatBytes, formatDurationHMS, runConcurrentPool, runAdaptivePool, createAggregatedProgress } = require('../utils/concurrent-pool');
 
 /**
  * 全量推送引擎 (Push 模式)
@@ -72,7 +72,20 @@ class FullPush {
       const progress = createAggregatedProgress(localTotalBytes, allLocalRelPaths.length);
 
       let failedCount = 0;
-      await runConcurrentPool(allLocalRelPaths, concurrency || 4, async (rel) => {
+      const getSize = (rel) => {
+        try {
+          return fs.statSync(path.resolve(source, rel)).size;
+        } catch (_) {
+          return 0;
+        }
+      };
+
+      await runAdaptivePool(allLocalRelPaths, {
+        concurrency: concurrency || 4,
+        largeThreshold: task.largeFileThreshold,
+        getSize,
+        logger: this.logger,
+      }, async (rel) => {
         const localFullPath = path.resolve(source, rel);
         const remoteTarget = toPosixPath(path.posix.join(remoteTargetBase, toPosixPath(rel)));
         try {
@@ -96,6 +109,10 @@ class FullPush {
         }
       });
       progress.finish();
+
+      if (failedCount > 0) {
+        throw new Error(`[full-push] ${name}: 存在 ${failedCount} 个文件上传失败，全量推送未完成`);
+      }
     }
 
     // 2. 执行远程保留策略清理 (Remote Retention)

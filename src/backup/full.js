@@ -5,7 +5,7 @@ const { LocalStorage } = require('../storage/local-storage');
 const { Retention } = require('../storage/retention');
 const { zipDirectory } = require('../utils/compress');
 const { buildBackupDirName, toRelativePath, safeJoin } = require('../utils/path');
-const { runConcurrentPool, createAggregatedProgress, formatDurationHMS } = require('../utils/concurrent-pool');
+const { runConcurrentPool, runAdaptivePool, createAggregatedProgress, formatDurationHMS } = require('../utils/concurrent-pool');
 
 /**
  * 全量备份引擎：每次生成带时间戳的独立副本，按 maxBackups 清理旧版本
@@ -47,7 +47,12 @@ class FullBackup {
     const totalBytes = remoteFileEntries.reduce((sum, f) => sum + f.size, 0);
     const progress = createAggregatedProgress(totalBytes, remoteFileEntries.length);
 
-    await runConcurrentPool(remoteFileEntries, concurrency || 4, async (entry) => {
+    await runAdaptivePool(remoteFileEntries, {
+      concurrency: concurrency || 4,
+      largeThreshold: task.largeFileThreshold,
+      getSize: (entry) => entry?.size || 0,
+      logger: this.logger,
+    }, async (entry) => {
       const rel = toRelativePath(entry.path, source);
       const localPath = safeJoin(backupDir, rel);
       try {

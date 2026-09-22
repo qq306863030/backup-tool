@@ -15,6 +15,21 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+/** 续传时的「保序并发写」流水线深度（默认值，可由 server.pipeConcurrency 覆盖） */
+const DEFAULT_PIPE_CONCURRENCY = 8;
+/** 单次 write 请求的块大小 */
+const WRITE_CHUNK_SIZE = 64 * 1024;
+/**
+ * 断线后自动重连并续传的最大尝试次数
+ * 续传每次都能累积远程进度，故可比 server.retry.max 放宽
+ */
+const RESUME_MAX_ATTEMPTS = 10;
+/** 重连退避的基数与上限（毫秒），避免断网时高频重连 */
+const RECONNECT_BACKOFF_BASE_MS = 1000;
+const RECONNECT_BACKOFF_MAX_MS = 30000;
+/** 关闭连接的最长等待时间（毫秒），超时则强制销毁底层 socket */
+const CLOSE_TIMEOUT_MS = 3000;
+
 /**
  * SFTP 连接器：封装 ssh2-sftp-client
  * 统一接口：connect / listFiles / download / close
@@ -49,13 +64,33 @@ class SftpConnector {
 
   /**
    * 判断错误是否为连接断开/网络重置相关
+   *
+   * ⚠️ 关键点：ssh2 在 socket 关闭时会把**所有挂起的请求回调**统一抛出
+   * `Error('No response from server')`（见 ssh2 `lib/client.js` 与
+   * `lib/protocol/SFTP.js` 的 cleanupRequests）。大文件长时间传输时，
+   * 网络抖动/对端强制断开会表现为 write ECONNRESET + No response from server，
+   * 若不把它判定为连接错误，断点续传分支永远不会触发，整个任务就会直接失败。
    * @param {Error} err
    * @returns {boolean}
    */
   isConnectionError(err) {
     if (!err) return false;
-    const msg = `${err.message || ''} ${err.code || ''} ${err.name || ''} ${err.description || ''}`;
-    return /keepalive|ECONNRESET|ECONNABORTED|ETIMEDOUT|EPIPE|ENOTCONN|closed|Not connected|No SFTP connection|client is not connected|Channel closed|Socket closed|Handshake failed/i.test(msg);
+    const cause = err.cause;
+    const msg = [
+      err.message,
+      err.code,
+      err.name,
+      err.description,
+      err.level, // ssh2 会附加 'client-socket' / 'client-timeout'
+      cause && cause.message,
+      cause && cause.code,
+      cause && cause.level,
+    ]
+      .filter((v) => typeof v === 'string' && v.length > 0)
+      .join(' ');
+    return /keepalive|no response from server|ECONNRESET|ECONNABORTED|ECONNREFUSED|ETIMEDOUT|ESOCKETTIMEDOUT|EPIPE|ENOTCONN|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|socket hang up|connection (lost|reset|closed)|closed|Not connected|No SFTP connection|client is not connected|Channel closed|Socket closed|Handshake failed|client-socket|client-timeout/i.test(
+      msg
+    );
   }
 
   /**
@@ -69,9 +104,7 @@ class SftpConnector {
     this._reconnectPromise = (async () => {
       const log = getLogger();
       log.warn(`[sftp] 检测到网络连接断开，正在自动重新连接 ${this.server.host}:${this.server.port}...`);
-      try {
-        await this.close();
-      } catch (_) {}
+      await this._destroyClient();
       this.client = this._createSftpClient();
       this.connected = false;
       this._ensuredRemoteDirs = new Set();
@@ -82,6 +115,37 @@ class SftpConnector {
       this._reconnectPromise = null;
     });
     return this._reconnectPromise;
+  }
+
+  /**
+   * 关闭并销毁当前底层连接（带超时保护）
+   * 半开连接上调用 end() 可能永远不返回（end() 依赖 close 事件），
+   * 因此超时后直接销毁底层 socket，避免重连流程被卡死、进程无法退出。
+   * @private
+   * @returns {Promise<void>}
+   */
+  async _destroyClient() {
+    const client = this.client;
+    this.connected = false;
+    if (!client) return;
+    let timer = null;
+    try {
+      await Promise.race([
+        Promise.resolve().then(() => client.end()),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('关闭 SFTP 连接超时')), CLOSE_TIMEOUT_MS);
+        }),
+      ]);
+    } catch (err) {
+      const ssh = client.client;
+      if (ssh && typeof ssh.destroy === 'function') {
+        try {
+          ssh.destroy();
+        } catch (_) {}
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /**
@@ -430,7 +494,7 @@ class SftpConnector {
    *          status: completed（完整下载）/ resumed（续传）/ skipped（已存在跳过）
    */
   async downloadResume(remotePath, localPath, mtime, onProgress, attempt = 1) {
-    const maxAttempts = this.server?.retry?.max || 3;
+    const maxAttempts = Math.max(this.server?.retry?.max || 3, RESUME_MAX_ATTEMPTS);
     try {
       await this.ensureConnected();
 
@@ -465,24 +529,38 @@ class SftpConnector {
       // 追加模式写入本地，保留已有部分
       const ws = fs.createWriteStream(localPath, { flags: 'a' });
 
-      await new Promise((resolve, reject) => {
-        rs.on('data', (chunk) => {
-          transferred += chunk.length;
-          if (onProgress) onProgress(transferred, total);
+      try {
+        await new Promise((resolve, reject) => {
+          rs.on('data', (chunk) => {
+            transferred += chunk.length;
+            if (onProgress) onProgress(transferred, total);
+          });
+          rs.on('error', (err) => reject(new ConnectionError(`下载文件失败 ${remotePath}: ${err.message}`, err)));
+          ws.on('error', (err) => reject(new ConnectionError(`写入本地文件失败 ${localPath}: ${err.message}`, err)));
+          ws.on('finish', resolve);
+          rs.pipe(ws);
         });
-        rs.on('error', (err) => reject(new ConnectionError(`下载文件失败 ${remotePath}: ${err.message}`, err)));
-        ws.on('error', (err) => reject(new ConnectionError(`写入本地文件失败 ${localPath}: ${err.message}`, err)));
-        ws.on('finish', resolve);
-        rs.pipe(ws);
-      });
+      } finally {
+        // 断线时 pipe 不会自动销毁对端流，需显式释放，避免句柄泄漏
+        if (!rs.destroyed) rs.destroy();
+        if (!ws.destroyed) ws.destroy();
+      }
 
       this.setMtime(localPath, mtime);
       return { status: localSize > 0 ? 'resumed' : 'completed', transferred: total, total };
     } catch (err) {
       if (this.isConnectionError(err) && attempt < maxAttempts) {
         const log = getLogger();
-        log.warn(`[sftp] 下载连接断开 (${err.message})，正在自动重连并续传 (${attempt}/${maxAttempts})...`);
-        await this.reconnect();
+        const delay = Math.min(RECONNECT_BACKOFF_BASE_MS * 2 ** (attempt - 1), RECONNECT_BACKOFF_MAX_MS);
+        log.warn(
+          `[sftp] 下载连接断开 (${err.message})，${delay}ms 后自动重连并断点续传 (${attempt}/${maxAttempts})...`
+        );
+        await sleep(delay);
+        try {
+          await this.reconnect();
+        } catch (reconnectErr) {
+          log.warn(`[sftp] 自动重连失败: ${reconnectErr.message}`);
+        }
         return this.downloadResume(remotePath, localPath, mtime, onProgress, attempt + 1);
       }
       throw err instanceof ConnectionError ? err : new ConnectionError(`下载文件失败 ${remotePath}: ${err.message}`, err);
@@ -492,15 +570,22 @@ class SftpConnector {
   /**
    * 断点续传上传单个文件
    * 远程已有部分数据时从断点继续（以追加模式写入末尾）
+   *
+   * 吞吐说明：SFTP 单条 write 请求需要等待一次网络往返，逐块串行写入时
+   * 实际速率被 RTT 锁死（64KB / 60ms ≈ 1MB/s）。这里改为「保序并发写」：
+   * 按块顺序提交最多 pipeConcurrency 个写请求，服务端（OpenSSH sftp-server）
+   * 顺序处理同一句柄的请求并按到达顺序追加，数据顺序依旧正确，
+   * 但吞吐可提升数倍，显著缩短超长传输暴露在弱网下的时间窗口。
+   *
    * @param {string} localPath 本地文件路径
    * @param {string} remotePath 远程文件路径
-   * @param {Function} [onProgress] (transferred, total) => void 进度回调
+   * @param {Function} [onProgress] (transferred, total) => void 进度回调，transferred 为含续传起点的累计值
    * @param {number} [attempt=1] 当前重试次数
    * @returns {Promise<{status: string, transferred: number, total: number}>}
    *          status: completed（完整上传）/ resumed（续传）/ skipped（已存在跳过）
    */
   async uploadResume(localPath, remotePath, onProgress, attempt = 1) {
-    const maxAttempts = this.server?.retry?.max || 3;
+    const maxAttempts = Math.max(this.server?.retry?.max || 3, RESUME_MAX_ATTEMPTS);
     const total = fs.statSync(localPath).size;
 
     try {
@@ -526,67 +611,145 @@ class SftpConnector {
       log.info(`[sftp] 上传 ${remoteLabel}: ${baseName} (本地 ${formatBytes(total)}) -> ${remotePath}`);
 
       // 使用底层 SFTP 原语：以追加模式（SSH_FXF_APPEND）打开远程文件，
-      // write 时 position 传 null，数据始终写入文件末尾，实现断点续传
+      // 写入时数据始终落在文件末尾，从而实现断点续传
       const sftp = this.client.sftp;
-      let handle;
-      try {
-        handle = await new Promise((resolve, reject) => {
-          sftp.open(remotePath, 'a', (err, h) => (err ? reject(err) : resolve(h)));
-        });
-      } catch (openErr) {
-        // 若出现 No such file，通常是远程父目录在并发时未完成创建，进行一次重试
-        if (/no such file|ENOENT/i.test(openErr.message)) {
-          await this.ensureRemoteDir(path.posix.dirname(remotePath));
-          handle = await new Promise((resolve, reject) => {
-            sftp.open(remotePath, 'a', (err, h) => (err ? reject(err) : resolve(h)));
-          });
-        } else {
-          throw openErr;
-        }
-      }
+      const handle = await this._openRemoteAppend(sftp, remotePath);
 
-      let transferred = remoteSize;
-      let lastProgressAt = 0;
+      let lastProgressAt = Date.now();
+      let written = 0;
       try {
-        const rs = fs.createReadStream(localPath, { start: remoteSize, highWaterMark: 64 * 1024 });
-        for await (const chunk of rs) {
-          // APPEND 模式（SSH_FXF_APPEND）下协议强制写入文件末尾，忽略 position，传 0 即可
-          await new Promise((resolve, reject) => {
-            sftp.write(handle, chunk, 0, chunk.length, 0, (err) =>
-              err ? reject(err) : resolve()
-            );
-          });
-          transferred += chunk.length;
-          if (onProgress) onProgress(transferred, total);
+        written = await this._writeLocalToRemote(sftp, handle, localPath, remoteSize, (bytesWritten) => {
+          if (onProgress) onProgress(remoteSize + bytesWritten, total);
 
           // 大文件每 5 秒打印一次进度日志，便于观察是否真的在传
           const now = Date.now();
           if (now - lastProgressAt >= 5000) {
             lastProgressAt = now;
+            const transferred = remoteSize + bytesWritten;
             const pct = ((transferred / total) * 100).toFixed(1);
-            const speed = transferred / ((now - t0) / 1000);
-            log.info(`[sftp] ${baseName} 上传进度: ${formatBytes(transferred)}/${formatBytes(total)} (${pct}%) ${formatBytes(speed)}/s`);
+            // 速率只按「本轮实际写入量」计算，避免把续传起点算进去造成虚假高速
+            const rate = bytesWritten / ((now - t0) / 1000);
+            log.info(
+              `[sftp] ${baseName} 上传进度: ${formatBytes(transferred)}/${formatBytes(total)} (${pct}%)` +
+              ` 本轮已写入 ${formatBytes(bytesWritten)}，速率 ${formatBytes(rate)}/s`
+            );
           }
-        }
+        });
       } finally {
-        if (handle && this.client && this.client.sftp) {
+        // 用捕获的 sftp 对象关闭句柄，避免重连后误关新连接上的句柄
+        if (handle) {
           try {
             await new Promise((resolve) => sftp.close(handle, () => resolve()));
           } catch (_) {}
         }
       }
+
       const duration = Date.now() - t0;
-      log.info(`[sftp] 上传完成 ${baseName}: ${formatBytes(transferred)}/${formatBytes(total)}（耗时 ${duration}ms）`);
+      log.info(
+        `[sftp] 上传完成 ${baseName}: ${formatBytes(remoteSize + written)}/${formatBytes(total)}` +
+        `（本轮写入 ${formatBytes(written)}，耗时 ${duration}ms）`
+      );
       return { status: remoteSize > 0 ? 'resumed' : 'completed', transferred: total, total };
     } catch (err) {
       if (this.isConnectionError(err) && attempt < maxAttempts) {
         const log = getLogger();
-        log.warn(`[sftp] 上传连接断开 (${err.message})，正在自动重连并断点续传 (${attempt}/${maxAttempts})...`);
-        await this.reconnect();
+        const delay = Math.min(RECONNECT_BACKOFF_BASE_MS * 2 ** (attempt - 1), RECONNECT_BACKOFF_MAX_MS);
+        log.warn(
+          `[sftp] 上传连接断开 (${err.message})，${delay}ms 后自动重连并断点续传 (${attempt}/${maxAttempts})...`
+        );
+        await sleep(delay);
+        try {
+          await this.reconnect();
+        } catch (reconnectErr) {
+          // 重连失败不终止流程：下一轮递归的 ensureConnected() 会再次尝试
+          log.warn(`[sftp] 自动重连失败: ${reconnectErr.message}`);
+        }
         return this.uploadResume(localPath, remotePath, onProgress, attempt + 1);
       }
       throw err instanceof ConnectionError ? err : new ConnectionError(`上传文件失败 ${localPath}: ${err.message}`, err);
     }
+  }
+
+  /**
+   * 以追加模式打开远程文件（必要时先补建父目录）
+   * @private
+   * @param {object} sftp 底层 SFTP 对象
+   * @param {string} remotePath 远程文件路径
+   * @returns {Promise<Buffer>} 远程文件句柄
+   */
+  async _openRemoteAppend(sftp, remotePath) {
+    const open = () =>
+      new Promise((resolve, reject) => {
+        sftp.open(remotePath, 'a', (err, h) => (err ? reject(err) : resolve(h)));
+      });
+
+    try {
+      return await open();
+    } catch (openErr) {
+      // 若出现 No such file，通常是远程父目录在并发时未完成创建，补建后重试一次
+      if (/no such file|ENOENT/i.test(openErr.message)) {
+        await this.ensureRemoteDir(path.posix.dirname(remotePath));
+        return open();
+      }
+      throw openErr;
+    }
+  }
+
+  /**
+   * 保序并发地把本地文件从 startOffset 起写入远程句柄
+   *
+   * 顺序保证：写请求严格按文件块的先后顺序提交；ssh2 在连接断开时会用
+   * `No response from server` 拒绝所有挂起请求，因此不会出现永久挂起。
+   *
+   * @private
+   * @param {object} sftp 底层 SFTP 对象
+   * @param {Buffer} handle 远程文件句柄（追加模式）
+   * @param {string} localPath 本地文件路径
+   * @param {number} startOffset 本地文件读取起点（断点位置）
+   * @param {Function} [onWritten] (bytesWrittenThisRun) => void 本轮已写入字节数回调
+   * @returns {Promise<number>} 本轮实际写入的字节数
+   */
+  async _writeLocalToRemote(sftp, handle, localPath, startOffset, onWritten) {
+    const concurrency = Math.max(1, parseInt(this.server?.pipeConcurrency, 10) || DEFAULT_PIPE_CONCURRENCY);
+    const rs = fs.createReadStream(localPath, { start: startOffset, highWaterMark: WRITE_CHUNK_SIZE });
+    const inFlight = new Set();
+    let written = 0;
+    let firstError = null;
+
+    const submit = (chunk) => {
+      const p = new Promise((resolve, reject) => {
+        // APPEND 模式（SSH_FXF_APPEND）下协议强制写入文件末尾，忽略 position，传 0 即可
+        sftp.write(handle, chunk, 0, chunk.length, 0, (err) => (err ? reject(err) : resolve()));
+      })
+        .then(() => {
+          written += chunk.length;
+          if (onWritten) onWritten(written);
+        })
+        .catch((err) => {
+          if (!firstError) firstError = err;
+        })
+        .finally(() => {
+          inFlight.delete(p);
+        });
+      inFlight.add(p);
+    };
+
+    try {
+      for await (const chunk of rs) {
+        // 控制并发：挂起请求达到上限时，等最早提交的一个落定
+        while (inFlight.size >= concurrency) {
+          await Promise.race(inFlight);
+        }
+        if (firstError) break;
+        submit(chunk);
+      }
+      await Promise.all(inFlight);
+    } finally {
+      rs.destroy();
+    }
+
+    if (firstError) throw firstError;
+    return written;
   }
 
   /**
@@ -698,14 +861,7 @@ class SftpConnector {
    * @returns {Promise<void>}
    */
   async close() {
-    if (this.connected) {
-      try {
-        await this.client.end();
-      } catch (err) {
-        // 忽略关闭错误
-      }
-      this.connected = false;
-    }
+    await this._destroyClient();
   }
 
   /**

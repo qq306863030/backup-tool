@@ -273,6 +273,8 @@ backup pull prod /etc/nginx ./downloads
       // ---- 连接、重试与超时（可选，省略用默认值） ----
       // connectTimeout: 10000,     // 默认 10000ms
       // retry: { max: 3, delay: 5000 }, // 默认 { max: 3, delay: 5000 }
+      // pipeConcurrency: 8,        // 默认 8；单文件断点续传时的「保序并发写」流水线深度
+      //                            // 高延迟/弱网下提升吞吐（4~16 为宜），1 表示退回逐块串行
       // timeout: -1,               // 总超时（小时），-1 表示不限制（默认）
       //                            // 各 server 串行执行，backup exec 的总超时
       //                            // 为各 server.timeout 之和；任一为 -1 则整体不限

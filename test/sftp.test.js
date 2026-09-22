@@ -2,6 +2,9 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { SftpConnector } = require('../src/connectors/sftp');
 
 /**
@@ -204,4 +207,123 @@ test('SftpConnector.isConnectionError: 正确识别 Keepalive timeout 及常规�
   assert.strictEqual(connector.isConnectionError(new Error('Socket closed')), true);
   assert.strictEqual(connector.isConnectionError(new Error('No such file or directory')), false);
   assert.strictEqual(connector.isConnectionError(new Error('Permission denied')), false);
+});
+
+test('SftpConnector.isConnectionError: 识别 ssh2 断线时抛出的 "No response from server"', () => {
+  const connector = new SftpConnector({ host: 'x', port: 22, username: 'u', connectTimeout: 1000, retry: { max: 1, delay: 0 } });
+
+  // ssh2 在 socket 关闭时以此错误拒绝所有挂起请求，必须纳入重连续传判定
+  assert.strictEqual(connector.isConnectionError(new Error('No response from server')), true);
+  assert.strictEqual(connector.isConnectionError(new Error('write ECONNRESET')), true);
+  assert.strictEqual(connector.isConnectionError(new Error('socket hang up')), true);
+
+  const socketErr = new Error('read ECONNRESET');
+  socketErr.level = 'client-socket';
+  assert.strictEqual(connector.isConnectionError(socketErr), true);
+
+  // 包装层（ConnectionError 带 cause）同样应被识别
+  const wrapped = new Error('上传文件失败 /tmp/a: No response from server');
+  wrapped.cause = new Error('No response from server');
+  assert.strictEqual(connector.isConnectionError(wrapped), true);
+});
+
+test('SftpConnector._writeLocalToRemote: 保序并发写入，数据顺序与文件一致', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bak-write-'));
+  const local = path.join(tmpDir, 'data.bin');
+  const payload = Buffer.alloc(300 * 1024);
+  for (let i = 0; i < payload.length; i++) payload[i] = i % 251;
+  fs.writeFileSync(local, payload);
+
+  const writes = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const sftp = {
+    write: (handle, chunk, off, len, pos, cb) => {
+      writes.push(Buffer.from(chunk));
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      // 模拟网络往返延迟：让本地读流有机会把并发流水线填满
+      setTimeout(() => {
+        inFlight--;
+        cb(null);
+      }, 5);
+    },
+  };
+
+  const connector = new SftpConnector({
+    host: 'x',
+    port: 22,
+    username: 'u',
+    connectTimeout: 1000,
+    retry: { max: 1, delay: 0 },
+    pipeConcurrency: 4,
+  });
+
+  const offset = 100 * 1024;
+  const written = await connector._writeLocalToRemote(sftp, Buffer.from('handle'), local, offset);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+
+  assert.strictEqual(written, payload.length - offset);
+  // 并发写但提交顺序严格等于文件顺序 → 拼接结果必须与原文件剩余部分完全一致
+  assert.deepStrictEqual(Buffer.concat(writes), payload.subarray(offset));
+  // 确实发生了并发（未退化为逐块串行）
+  assert.ok(maxInFlight > 1, `期望出现并发写，实际最大并发 ${maxInFlight}`);
+});
+
+test('SftpConnector.uploadResume: 遇 "No response from server" 自动重连并从断点续传成功', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bak-resume-'));
+  const local = path.join(tmpDir, 'big.bin');
+  const payload = Buffer.alloc(200 * 1024, 3);
+  fs.writeFileSync(local, payload);
+
+  // 模拟远端：已有 50KB 残片（上次断线遗留）
+  let remoteData = Buffer.alloc(50 * 1024, 3);
+  let writeCalls = 0;
+  let connectCount = 0;
+
+  const makeClient = () => ({
+    sftp: {
+      open: (p, flags, cb) => setImmediate(() => cb(null, Buffer.from('handle'))),
+      close: (h, cb) => setImmediate(() => cb(null)),
+      write: (h, chunk, off, len, pos, cb) => {
+        writeCalls++;
+        if (writeCalls === 2) {
+          // 第二次写时模拟 TCP 被重置，ssh2 会以该错误拒绝所有挂起请求
+          return setImmediate(() => cb(new Error('No response from server')));
+        }
+        remoteData = Buffer.concat([remoteData, Buffer.from(chunk)]);
+        setImmediate(() => cb(null));
+      },
+    },
+    stat: async () => ({ size: remoteData.length }),
+    connect: async () => {
+      connectCount++;
+    },
+    end: async () => {},
+  });
+
+  const connector = new SftpConnector({
+    host: 'x',
+    port: 22,
+    username: 'u',
+    auth: { type: 'password', password: 'pwd' },
+    connectTimeout: 1000,
+    retry: { max: 1, delay: 0 },
+    pipeConcurrency: 1,
+  });
+  connector.client = makeClient();
+  connector.connected = true;
+  // 重连时会创建新的 client，这里复用同一份 mock
+  connector._createSftpClient = () => makeClient();
+
+  try {
+    const result = await connector.uploadResume(local, '/remote/big.bin');
+
+    assert.strictEqual(result.status, 'resumed');
+    assert.strictEqual(connectCount, 1, '应触发一次自动重连');
+    assert.strictEqual(remoteData.length, payload.length, '重连后应从断点续传至完整');
+    assert.ok(remoteData.every((b) => b === 3), '续传后内容必须与原文件一致（无重复/错位写入）');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });

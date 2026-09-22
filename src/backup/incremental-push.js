@@ -162,12 +162,18 @@ class IncrementalPush {
     }
 
     const totalDuration = formatDurationHMS(Date.now() - t0);
-    this.logger.info(
-      `[incremental-push] ${name}: 增量推送全部完成！总耗时: ${totalDuration}, 上传: ${uploadedCount}, 跳过: ${skippedCount}, 失败: ${failedCount}, 删除: ${deletedCount}`
-    );
     if (failedCount > 0) {
-      throw new Error(`[incremental-push] ${name}: 存在 ${failedCount} 个文件上传失败，增量推送未完全成功`);
+      this.logger.error(
+        `[incremental-push] ${name}: 增量推送未完成！总耗时: ${totalDuration}, 上传: ${uploadedCount}, 跳过: ${skippedCount}, 失败: ${failedCount}, 删除: ${deletedCount}`
+      );
+      throw new Error(
+        `[incremental-push] ${name}: 存在 ${failedCount} 个文件上传失败，增量推送未完全成功` +
+        `（已上传的远程分片会保留，重新执行 bak exec 即可从断点继续）`
+      );
     }
+    this.logger.info(
+      `[incremental-push] ${name}: 增量推送全部完成！总耗时: ${totalDuration}, 上传: ${uploadedCount}, 跳过: ${skippedCount}, 失败: 0, 删除: ${deletedCount}`
+    );
     return { uploadedCount, skippedCount, deletedCount, failedCount, duration: totalDuration };
   }
 }

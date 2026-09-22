@@ -47,6 +47,10 @@ function validateServer(server) {
       );
     }
   }
+  // pipeConcurrency：断点续传并发写流水线深度，必须是 >= 1 的正整数
+  if (typeof server.pipeConcurrency !== 'number' || Number.isNaN(server.pipeConcurrency) || server.pipeConcurrency < 1) {
+    throw new ConfigError(`服务器 ${server.host} 的 pipeConcurrency 必须是 >= 1 的正整数`);
+  }
   if (!Array.isArray(server.tasks) || server.tasks.length === 0) {
     throw new ConfigError(`服务器 ${server.host} 缺少 tasks`);
   }

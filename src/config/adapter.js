@@ -23,6 +23,10 @@ const DEFAULTS = {
     retry: { max: 3, delay: 5000 },
     // 单个文件断点续传时的「保序并发写」流水线深度（提升弱网/高延迟下的吞吐）
     pipeConcurrency: 8,
+    // 单文件断线续传的最大尝试次数：超大文件在弱网下会反复掉线，需足够大
+    resumeMaxAttempts: 30,
+    // 数据静默看门狗（毫秒）：连续多久没有任何写/读应答即判定链路假死并重连续传
+    stallTimeout: 60000,
   },
   task: {
     direction: 'pull',
@@ -125,6 +129,10 @@ function adaptServer(server, defaultBasedir) {
     },
     // 断点续传并发写流水线深度：越大吞吐越高，弱网下建议 4~16
     pipeConcurrency: parseInt(server.pipeConcurrency ?? DEFAULTS.server.pipeConcurrency, 10),
+    // 断线续传最大尝试次数：130GB+ 文件在弱网下会反复掉线，建议 20~100
+    resumeMaxAttempts: parseInt(server.resumeMaxAttempts ?? DEFAULTS.server.resumeMaxAttempts, 10),
+    // 数据静默看门狗（毫秒）：链路假死时主动断开重连，而非静默挂死/退出
+    stallTimeout: parseInt(server.stallTimeout ?? DEFAULTS.server.stallTimeout, 10),
     // 上传/下载基准目录：server 级优先，其次顶层，未配置则为 null（默认服务器主目录）
     uploadBasedir: server['upload-basedir'] || defaultBasedir || null,
   };

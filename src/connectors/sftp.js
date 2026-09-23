@@ -20,10 +20,26 @@ const DEFAULT_PIPE_CONCURRENCY = 8;
 /** 单次 write 请求的块大小 */
 const WRITE_CHUNK_SIZE = 64 * 1024;
 /**
- * 断线后自动重连并续传的最大尝试次数
- * 续传每次都能累积远程进度，故可比 server.retry.max 放宽
+ * 断线后自动重连并续传的最大尝试次数（默认值，可由 server.resumeMaxAttempts 覆盖）
+ * 续传每次都能累积远程进度，故可比 server.retry.max 放宽。
+ * 超大文件（几十 GB）在弱网下会反复掉线，默认值需足够大，否则永远传不完。
  */
-const RESUME_MAX_ATTEMPTS = 10;
+const DEFAULT_RESUME_MAX_ATTEMPTS = 30;
+/**
+ * 数据静默看门狗（默认值，可由 server.stallTimeout 覆盖）
+ * 连接「假死」（不返回写应答也不发 RST）时，挂起请求会一直不落定，
+ * 进程既不推进也不报错。超过该时间没有任何应答即判定链路失效。
+ */
+const DEFAULT_STALL_TIMEOUT_MS = 60000;
+/**
+ * 关闭远程文件句柄的最长等待时间（毫秒）
+ * ⚠️ 连接断开后 ssh2 的 SFTP 通道 outgoing.state 已是 closed，
+ * `sftp.close()` 只会把请求登记进 _requests 却**永远不会回调**。
+ * 没有上限时这里会永久 await，详见 _closeRemoteHandle 注释。
+ */
+const HANDLE_CLOSE_TIMEOUT_MS = 2000;
+/** 预检类请求（stat / open）的最长等待时间（毫秒），避免半开连接上无限挂起 */
+const PREFLIGHT_TIMEOUT_MS = 60000;
 /** 重连退避的基数与上限（毫秒），避免断网时高频重连 */
 const RECONNECT_BACKOFF_BASE_MS = 1000;
 const RECONNECT_BACKOFF_MAX_MS = 30000;
@@ -91,6 +107,140 @@ class SftpConnector {
     return /keepalive|no response from server|ECONNRESET|ECONNABORTED|ECONNREFUSED|ETIMEDOUT|ESOCKETTIMEDOUT|EPIPE|ENOTCONN|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|socket hang up|connection (lost|reset|closed)|closed|Not connected|No SFTP connection|client is not connected|Channel closed|Socket closed|Handshake failed|client-socket|client-timeout/i.test(
       msg
     );
+  }
+
+  /** 静默看门狗超时（毫秒），支持 server.stallTimeout 覆盖 */
+  _stallTimeoutMs() {
+    const configured = parseInt(this.server?.stallTimeout, 10);
+    return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_STALL_TIMEOUT_MS;
+  }
+
+  /** 断线续传最大尝试次数，支持 server.resumeMaxAttempts 覆盖（且不小于 retry.max） */
+  _resumeMaxAttempts() {
+    const configured = parseInt(this.server?.resumeMaxAttempts, 10);
+    const fallback = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_RESUME_MAX_ATTEMPTS;
+    return Math.max(this.server?.retry?.max || 3, fallback);
+  }
+
+  /**
+   * 主动销毁底层 SSH 连接（不等待优雅关闭）
+   * 用于看门狗判定链路假死后立即打断挂起请求，让等待中的 Promise 尽快落定，
+   * 否则挂起的 write/read 回调会一直不返回，事件循环空转后进程会「静默退出 0」
+   */
+  _forceDestroyClient() {
+    this.connected = false;
+    const ssh = this.client && this.client.client;
+    if (ssh && typeof ssh.destroy === 'function') {
+      try {
+        ssh.destroy();
+      } catch (_) {}
+    }
+  }
+
+  /**
+   * 给任意 Promise 加超时上限，超时按「连接类错误」抛出
+   * 超时时一并销毁死连接，确保进入断线重连续传分支而不是原地卡死
+   * @private
+   * @param {Promise} promise 原始请求
+   * @param {number} ms 超时毫秒数
+   * @param {string} message 超时错误信息
+   * @returns {Promise}
+   */
+  async _raceTimeout(promise, ms, message) {
+    if (!(ms > 0)) return promise;
+    // 落败方（后落定）不应变成 unhandledRejection
+    Promise.resolve(promise).catch(() => {});
+    let timer = null;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            const err = new Error(message);
+            err.level = 'client-timeout'; // 让 isConnectionError 判定为断线
+            this._forceDestroyClient();
+            reject(err);
+          }, ms);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * 创建「数据静默」看门狗
+   * arm() 在每次收到数据应答时重置计时；超时后抛连接类错误并销毁死连接。
+   * @private
+   * @param {string} message 超时错误信息
+   * @returns {{ promise: Promise, arm: Function, clear: Function }}
+   */
+  _createStallGuard(message) {
+    const ms = this._stallTimeoutMs();
+    let timer = null;
+    let fired = false;
+    let rejectFn = () => {};
+    const promise = new Promise((_, reject) => {
+      rejectFn = reject;
+    });
+    // 正常完成时该 Promise 永远不会落定，需挂一个空处理避免 unhandledRejection
+    promise.catch(() => {});
+
+    return {
+      promise,
+      arm: () => {
+        if (fired) return;
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          fired = true;
+          timer = null;
+          const err = new Error(message);
+          err.level = 'client-timeout'; // 让 isConnectionError 判定为断线
+          this._forceDestroyClient();
+          rejectFn(err);
+        }, ms);
+      },
+      clear: () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      },
+    };
+  }
+
+  /**
+   * 尽力关闭远程文件句柄（必须有超时上限）
+   *
+   * ⚠️ 关键点：连接被重置后，ssh2 的 SFTP 通道 outgoing.state 已是 closed，
+   * `sftp.close()` 只会把请求登记进 `_requests` 表，而清理函数
+   * （ssh2/lib/protocol/SFTP.js 的 cleanupRequests）**已经执行过了**，
+   * 因此这个回调永远不会被调用。若无超时：
+   *   1) 本 finally 会永久 await → 外层 catch 的「断线重连续传」永远不执行；
+   *   2) 此时 socket 已销毁、本地读流已释放，事件循环没有任何 ref →
+   *      Node 以退出码 0 静默退出，表现为「传着传着就没了，还提示备份完成」。
+   * @private
+   * @param {object} sftp 底层 SFTP 对象（断线时属于已死的旧连接）
+   * @param {Buffer} handle 远程文件句柄
+   * @returns {Promise<void>}
+   */
+  async _closeRemoteHandle(sftp, handle) {
+    if (!sftp || !handle) return;
+    try {
+      await this._raceTimeout(
+        new Promise((resolve) => {
+          try {
+            sftp.close(handle, () => resolve());
+          } catch (_) {
+            resolve();
+          }
+        }),
+        HANDLE_CLOSE_TIMEOUT_MS,
+        '关闭远程文件句柄超时（连接可能已断开）'
+      );
+    } catch (_) {
+      // 关闭句柄失败不影响主流程：连接已断时由服务端自行回收句柄
+    }
   }
 
   /**
@@ -494,15 +644,20 @@ class SftpConnector {
    *          status: completed（完整下载）/ resumed（续传）/ skipped（已存在跳过）
    */
   async downloadResume(remotePath, localPath, mtime, onProgress, attempt = 1) {
-    const maxAttempts = Math.max(this.server?.retry?.max || 3, RESUME_MAX_ATTEMPTS);
+    const maxAttempts = this._resumeMaxAttempts();
     try {
       await this.ensureConnected();
 
       let total = 0;
       try {
-        const stat = await this.client.stat(remotePath);
+        const stat = await this._raceTimeout(
+          this.client.stat(remotePath),
+          PREFLIGHT_TIMEOUT_MS,
+          `获取远程文件信息超时（${PREFLIGHT_TIMEOUT_MS / 1000}s 无响应）: ${remotePath}`
+        );
         total = stat.size;
       } catch (err) {
+        if (this.isConnectionError(err)) throw err;
         throw new ConnectionError(`获取远程文件信息失败 ${remotePath}: ${err.message}`, err);
       }
 
@@ -529,18 +684,29 @@ class SftpConnector {
       // 追加模式写入本地，保留已有部分
       const ws = fs.createWriteStream(localPath, { flags: 'a' });
 
+      // 下载同样需要静默看门狗：连接假死时 read 流不会有 data 也不会报错
+      const stall = this._createStallGuard(
+        `下载数据静默超时（${Math.round(this._stallTimeoutMs() / 1000)}s 未收到任何数据）`
+      );
+      stall.arm();
+
       try {
-        await new Promise((resolve, reject) => {
-          rs.on('data', (chunk) => {
-            transferred += chunk.length;
-            if (onProgress) onProgress(transferred, total);
-          });
-          rs.on('error', (err) => reject(new ConnectionError(`下载文件失败 ${remotePath}: ${err.message}`, err)));
-          ws.on('error', (err) => reject(new ConnectionError(`写入本地文件失败 ${localPath}: ${err.message}`, err)));
-          ws.on('finish', resolve);
-          rs.pipe(ws);
-        });
+        await Promise.race([
+          new Promise((resolve, reject) => {
+            rs.on('data', (chunk) => {
+              transferred += chunk.length;
+              stall.arm();
+              if (onProgress) onProgress(transferred, total);
+            });
+            rs.on('error', (err) => reject(new ConnectionError(`下载文件失败 ${remotePath}: ${err.message}`, err)));
+            ws.on('error', (err) => reject(new ConnectionError(`写入本地文件失败 ${localPath}: ${err.message}`, err)));
+            ws.on('finish', resolve);
+            rs.pipe(ws);
+          }),
+          stall.promise,
+        ]);
       } finally {
+        stall.clear();
         // 断线时 pipe 不会自动销毁对端流，需显式释放，避免句柄泄漏
         if (!rs.destroyed) rs.destroy();
         if (!ws.destroyed) ws.destroy();
@@ -585,7 +751,7 @@ class SftpConnector {
    *          status: completed（完整上传）/ resumed（续传）/ skipped（已存在跳过）
    */
   async uploadResume(localPath, remotePath, onProgress, attempt = 1) {
-    const maxAttempts = Math.max(this.server?.retry?.max || 3, RESUME_MAX_ATTEMPTS);
+    const maxAttempts = this._resumeMaxAttempts();
     const total = fs.statSync(localPath).size;
 
     try {
@@ -593,10 +759,17 @@ class SftpConnector {
 
       let remoteSize = 0;
       try {
-        const stat = await this.client.stat(remotePath);
+        const stat = await this._raceTimeout(
+          this.client.stat(remotePath),
+          PREFLIGHT_TIMEOUT_MS,
+          `获取远程文件信息超时（${PREFLIGHT_TIMEOUT_MS / 1000}s 无响应）: ${remotePath}`
+        );
         remoteSize = stat.size;
       } catch (err) {
-        remoteSize = 0; // 远程文件不存在
+        // 连接类错误必须上抛，交由断线重连续传分支处理；
+        // 其余（不存在/无权限）视为新文件，与原有行为一致
+        if (this.isConnectionError(err)) throw err;
+        remoteSize = 0;
       }
 
       // 远程大小已达到本地大小，视为已完成
@@ -636,12 +809,9 @@ class SftpConnector {
           }
         });
       } finally {
-        // 用捕获的 sftp 对象关闭句柄，避免重连后误关新连接上的句柄
-        if (handle) {
-          try {
-            await new Promise((resolve) => sftp.close(handle, () => resolve()));
-          } catch (_) {}
-        }
+        // 用捕获的 sftp 对象关闭句柄，避免重连后误关新连接上的句柄；
+        // 必须有超时上限：连接已断时 ssh2 永不会回调（曾导致进程静默退出 0）
+        await this._closeRemoteHandle(sftp, handle);
       }
 
       const duration = Date.now() - t0;
@@ -679,13 +849,19 @@ class SftpConnector {
    */
   async _openRemoteAppend(sftp, remotePath) {
     const open = () =>
-      new Promise((resolve, reject) => {
-        sftp.open(remotePath, 'a', (err, h) => (err ? reject(err) : resolve(h)));
-      });
+      this._raceTimeout(
+        new Promise((resolve, reject) => {
+          sftp.open(remotePath, 'a', (err, h) => (err ? reject(err) : resolve(h)));
+        }),
+        PREFLIGHT_TIMEOUT_MS,
+        `打开远程文件超时（${PREFLIGHT_TIMEOUT_MS / 1000}s 无响应）: ${remotePath}`
+      );
 
     try {
       return await open();
     } catch (openErr) {
+      // 连接类错误直接上抛，交给断线重连续传分支
+      if (this.isConnectionError(openErr)) throw openErr;
       // 若出现 No such file，通常是远程父目录在并发时未完成创建，补建后重试一次
       if (/no such file|ENOENT/i.test(openErr.message)) {
         await this.ensureRemoteDir(path.posix.dirname(remotePath));
@@ -699,7 +875,8 @@ class SftpConnector {
    * 保序并发地把本地文件从 startOffset 起写入远程句柄
    *
    * 顺序保证：写请求严格按文件块的先后顺序提交；ssh2 在连接断开时会用
-   * `No response from server` 拒绝所有挂起请求，因此不会出现永久挂起。
+   * `No response from server` 拒绝所有挂起请求；连接「假死」（不发 RST 也不回应答）
+   * 时由静默看门狗兜底，因此不会出现永久挂起。
    *
    * @private
    * @param {object} sftp 底层 SFTP 对象
@@ -716,6 +893,12 @@ class SftpConnector {
     let written = 0;
     let firstError = null;
 
+    // 静默看门狗：链路假死时挂起的 write 回调既不成功也不失败，
+    // 这里主动打断并转成「连接类错误」，走断线重连续传而不是原地卡死/静默退出
+    const stall = this._createStallGuard(
+      `写入静默超时（${Math.round(this._stallTimeoutMs() / 1000)}s 未收到服务端写入应答）`
+    );
+
     const submit = (chunk) => {
       const p = new Promise((resolve, reject) => {
         // APPEND 模式（SSH_FXF_APPEND）下协议强制写入文件末尾，忽略 position，传 0 即可
@@ -723,6 +906,7 @@ class SftpConnector {
       })
         .then(() => {
           written += chunk.length;
+          stall.arm(); // 收到应答即重置看门狗
           if (onWritten) onWritten(written);
         })
         .catch((err) => {
@@ -734,7 +918,9 @@ class SftpConnector {
       inFlight.add(p);
     };
 
-    try {
+    stall.arm();
+
+    const pipeline = (async () => {
       for await (const chunk of rs) {
         // 控制并发：挂起请求达到上限时，等最早提交的一个落定
         while (inFlight.size >= concurrency) {
@@ -744,12 +930,18 @@ class SftpConnector {
         submit(chunk);
       }
       await Promise.all(inFlight);
-    } finally {
-      rs.destroy();
-    }
+      if (firstError) throw firstError;
+      return written;
+    })();
+    // 看门狗抢先落定时 pipeline 仍可能后置 reject，需挂空处理避免 unhandledRejection
+    pipeline.catch(() => {});
 
-    if (firstError) throw firstError;
-    return written;
+    try {
+      return await Promise.race([pipeline, stall.promise]);
+    } finally {
+      stall.clear();
+      if (!rs.destroyed) rs.destroy();
+    }
   }
 
   /**
@@ -778,14 +970,24 @@ class SftpConnector {
     try {
       const sftp = this.client.sftp;
       // 使用底层 SFTP 原语设置远程文件 mtime
-      const handle = await new Promise((resolve, reject) => {
-        sftp.open(remotePath, 'r', (err, h) => (err ? reject(err) : resolve(h)));
-      });
-      const attrs = { mtime: Math.floor(ts / 1000) };
-      await new Promise((resolve, reject) => {
-        sftp.fsetstat(handle, attrs, (err) => (err ? reject(err) : resolve()));
-      });
-      await new Promise((resolve) => sftp.close(handle, () => resolve()));
+      const handle = await this._raceTimeout(
+        new Promise((resolve, reject) => {
+          sftp.open(remotePath, 'r', (err, h) => (err ? reject(err) : resolve(h)));
+        }),
+        PREFLIGHT_TIMEOUT_MS,
+        `设置远程 mtime：打开文件超时 ${remotePath}`
+      );
+      try {
+        await this._raceTimeout(
+          new Promise((resolve, reject) => {
+            sftp.fsetstat(handle, { mtime: Math.floor(ts / 1000) }, (err) => (err ? reject(err) : resolve()));
+          }),
+          PREFLIGHT_TIMEOUT_MS,
+          `设置远程 mtime：fsetstat 超时 ${remotePath}`
+        );
+      } finally {
+        await this._closeRemoteHandle(sftp, handle);
+      }
     } catch (err) {
       // 设置远程 mtime 失败不阻塞主流程
     }
@@ -815,12 +1017,20 @@ class SftpConnector {
     await (this._mkdirLock = this._mkdirLock.then(async () => {
       if (this._ensuredRemoteDirs.has(normalized)) return;
       try {
-        await this.client.mkdir(normalized, true);
+        await this._raceTimeout(
+          this.client.mkdir(normalized, true),
+          PREFLIGHT_TIMEOUT_MS,
+          `创建远程目录超时: ${normalized}`
+        );
         this._ensuredRemoteDirs.add(normalized);
       } catch (err) {
-        // 尝试检查目录是否已由并发 worker 创建
+        // 尝试检查目录是否已由并发 worker 创建（超时按不存在处理，不会死等）
         try {
-          const stat = await this.client.stat(normalized);
+          const stat = await this._raceTimeout(
+            this.client.stat(normalized),
+            PREFLIGHT_TIMEOUT_MS,
+            `检查远程目录超时: ${normalized}`
+          );
           if (stat.isDirectory) {
             this._ensuredRemoteDirs.add(normalized);
             return;

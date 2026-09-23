@@ -51,6 +51,16 @@ function validateServer(server) {
   if (typeof server.pipeConcurrency !== 'number' || Number.isNaN(server.pipeConcurrency) || server.pipeConcurrency < 1) {
     throw new ConfigError(`服务器 ${server.host} 的 pipeConcurrency 必须是 >= 1 的正整数`);
   }
+  // resumeMaxAttempts：断线续传最大尝试次数
+  if (typeof server.resumeMaxAttempts !== 'number' || Number.isNaN(server.resumeMaxAttempts) || server.resumeMaxAttempts < 1) {
+    throw new ConfigError(`服务器 ${server.host} 的 resumeMaxAttempts 必须是 >= 1 的正整数`);
+  }
+  // stallTimeout：数据静默看门狗（毫秒），至少 5 秒
+  if (typeof server.stallTimeout !== 'number' || Number.isNaN(server.stallTimeout) || server.stallTimeout < 5000) {
+    throw new ConfigError(
+      `服务器 ${server.host} 的 stallTimeout 必须是 >= 5000（毫秒）的正数，当前为 ${server.stallTimeout}`
+    );
+  }
   if (!Array.isArray(server.tasks) || server.tasks.length === 0) {
     throw new ConfigError(`服务器 ${server.host} 缺少 tasks`);
   }

@@ -37,19 +37,31 @@ async function main(configPath, options = {}) {
     const tExec0 = Date.now();
     logger.info('手动执行模式启动（跳过调度）');
     const scheduler = new CronScheduler(config, logger);
-    let count = 0;
+    const statuses = [];
     for (const server of config.servers) {
       for (const task of server.tasks) {
         if (!task.enabled) {
           logger.info(`[exec] 跳过禁用任务 ${task.name}`);
           continue;
         }
-        await scheduler.execute(server, task);
-        count++;
+        statuses.push(await scheduler.execute(server, task));
       }
     }
     const durationHMS = formatDurationHMS(Date.now() - tExec0);
-    logger.info(`手动执行完成，共执行 ${count} 个任务，总耗时: ${durationHMS}`);
+    const failed = statuses.filter((s) => !s.ok && !s.skipped);
+    if (failed.length > 0) {
+      logger.error(
+        `手动执行结束，共 ${statuses.length} 个任务，其中 ${failed.length} 个失败（` +
+        failed.map((f) => `${f.taskName}: ${f.error}`).join('; ') +
+        `），总耗时: ${durationHMS}`
+      );
+      process.exitCode = 1;
+    } else {
+      const skipped = statuses.filter((s) => s.skipped).length;
+      logger.info(
+        `手动执行完成，共执行 ${statuses.length} 个任务（${skipped} 个跳过），总耗时: ${durationHMS}`
+      );
+    }
     return;
   }
 
